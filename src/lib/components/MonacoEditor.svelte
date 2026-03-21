@@ -5,6 +5,8 @@
   import { invoke } from '@tauri-apps/api/core';
   import type * as Monaco from 'monaco-editor';
   import { bookmarks, toggleBookmark, hasBookmark, getNextBookmark } from '$lib/stores/bookmarks';
+  import { breakpoints } from '$lib/stores/debug';
+  import LocalHistoryDialog from './LocalHistoryDialog.svelte';
 
   let {
     content = '',
@@ -26,6 +28,10 @@
   let saveTimeout: ReturnType<typeof setTimeout>;
   let disposables: Monaco.IDisposable[] = [];
 
+  // Local History dialog state
+  let showLocalHistory = $state(false);
+  let localHistoryCurrentContent = $state('');
+
   // Bookmark decorations
   let bookmarkDecorations: string[] = [];
   let currentBookmarks: typeof $bookmarks = [];
@@ -33,6 +39,37 @@
     currentBookmarks = bm;
     applyBookmarkDecorations();
   });
+
+  // Breakpoint decorations
+  let breakpointDecorations: string[] = [];
+  let currentBreakpoints: typeof $breakpoints = [];
+  const unsubBreakpoints = breakpoints.subscribe(bps => {
+    currentBreakpoints = bps;
+    applyBreakpointDecorations();
+  });
+
+  function applyBreakpointDecorations() {
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const lineCount = model.getLineCount();
+
+    const newDecs: Monaco.editor.IModelDeltaDecoration[] = currentBreakpoints
+      .filter(b => b.filePath === path && b.line <= lineCount)
+      .map(b => ({
+        range: new monaco.Range(b.line, 1, b.line, 1),
+        options: {
+          isWholeLine: false,
+          linesDecorationsClassName: b.enabled ? 'vaire-breakpoint-gutter' : 'vaire-breakpoint-gutter-disabled',
+          overviewRuler: {
+            color: b.enabled ? '#ef4444' : '#ef444480',
+            position: monaco.editor.OverviewRulerLane.Left,
+          },
+        },
+      }));
+
+    breakpointDecorations = editor.deltaDecorations(breakpointDecorations, newDecs);
+  }
 
   function applyBookmarkDecorations() {
     if (!editor || !monaco) return;
@@ -125,11 +162,13 @@
   function scheduleAutoSave() {
     clearTimeout(saveTimeout);
     saveTimeout = setTimeout(async () => {
-      if (!editor || !path || path.startsWith('diff:')) return;
+      if (!editor || !path || path.startsWith('diff:') || path.startsWith('scratch:')) return;
       const currentContent = editor.getModel()?.getValue();
       if (currentContent !== undefined && currentContent !== content) {
         try {
           await invoke('write_file_content', { path, content: currentContent });
+          // Save a local history snapshot (fire-and-forget)
+          invoke('save_local_history', { filePath: path, content: currentContent }).catch(() => {});
         } catch (e) {
           console.error('Auto-save failed:', e);
         }
@@ -273,6 +312,21 @@
     });
     disposables.push(changeDisposable);
 
+    // Gutter click: toggle breakpoint
+    const gutterClickDisposable = editor.onMouseDown((e) => {
+      if (
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS ||
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+      ) {
+        const line = e.target.position?.lineNumber;
+        if (line && path && !path.startsWith('diff:')) {
+          breakpoints.toggleByFileAndLine(path, line);
+          applyBreakpointDecorations();
+        }
+      }
+    });
+    disposables.push(gutterClickDisposable);
+
     // Forward key shortcuts that Monaco would otherwise swallow
     // Cmd+K, Cmd+Shift+K, Cmd+D, Double Shift — dispatch to window
     const keysToForward = [
@@ -342,6 +396,20 @@
 
     // Initial bookmark decorations
     applyBookmarkDecorations();
+
+    // Context menu action: Show Local History
+    const historyAction = editor.addAction({
+      id: 'vaire-show-local-history',
+      label: 'Show Local History',
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 10,
+      run: (ed) => {
+        if (!path || path.startsWith('diff:')) return;
+        localHistoryCurrentContent = ed.getModel()?.getValue() || '';
+        showLocalHistory = true;
+      },
+    });
+    disposables.push(historyAction);
   });
 
   // React to theme changes
@@ -389,6 +457,7 @@
     if (editor && monaco) {
       fetchBlame();
       applyBookmarkDecorations();
+      applyBreakpointDecorations();
     }
   });
 
@@ -411,20 +480,49 @@
     }
   }
 
+  // Listen for tab context menu "Show Local History" trigger
+  function handleShowLocalHistory(e: Event) {
+    const detail = (e as CustomEvent<{ path: string }>).detail;
+    // Only open if this editor matches the path
+    if (detail?.path === path && editor) {
+      localHistoryCurrentContent = editor.getModel()?.getValue() || '';
+      showLocalHistory = true;
+    }
+  }
+
   onMount(() => {
     window.addEventListener('vaire:goto-line', handleGotoLine);
-    return () => window.removeEventListener('vaire:goto-line', handleGotoLine);
+    window.addEventListener('vaire:show-local-history', handleShowLocalHistory);
+    return () => {
+      window.removeEventListener('vaire:goto-line', handleGotoLine);
+      window.removeEventListener('vaire:show-local-history', handleShowLocalHistory);
+    };
   });
 
   onDestroy(() => {
     clearTimeout(saveTimeout);
     unsubBookmarks();
+    unsubBreakpoints();
     disposables.forEach(d => d.dispose());
     editor?.dispose();
   });
 </script>
 
 <div class="monaco-wrapper" bind:this={containerEl}></div>
+
+{#if showLocalHistory}
+  <LocalHistoryDialog
+    filePath={path}
+    currentContent={localHistoryCurrentContent}
+    onclose={() => { showLocalHistory = false; }}
+    onrestore={(restoredContent) => {
+      if (editor) {
+        editor.getModel()?.setValue(restoredContent);
+      }
+      showLocalHistory = false;
+    }}
+  />
+{/if}
 
 <style>
   .monaco-wrapper {
@@ -454,5 +552,29 @@
   /* Bookmark highlighted line (subtle) */
   :global(.vaire-bookmark-line) {
     background: rgba(240, 160, 48, 0.06);
+  }
+
+  /* Breakpoint gutter marker — filled red circle */
+  :global(.vaire-breakpoint-gutter) {
+    background: #ef4444;
+    width: 12px !important;
+    height: 12px !important;
+    border-radius: 50%;
+    margin-left: 2px;
+    margin-top: 2px;
+    cursor: pointer;
+  }
+
+  /* Disabled breakpoint — hollow red circle */
+  :global(.vaire-breakpoint-gutter-disabled) {
+    background: transparent;
+    border: 2px solid #ef4444;
+    width: 10px !important;
+    height: 10px !important;
+    border-radius: 50%;
+    margin-left: 2px;
+    margin-top: 3px;
+    cursor: pointer;
+    opacity: 0.5;
   }
 </style>

@@ -1,12 +1,100 @@
 <script lang="ts">
-  import { workspaceName, gitRepos } from '$lib/stores/workspace';
+  import { workspaceName, gitRepos, workspacePath } from '$lib/stores/workspace';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { invoke } from '@tauri-apps/api/core';
+  import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { runConfigs, activeRunConfigId } from '$lib/stores/runConfigs';
+  import { debugSession } from '$lib/stores/debug';
+  import { activeBottomPanel } from '$lib/stores/app';
+  import RunConfigDialog from './RunConfigDialog.svelte';
 
   let isFetchingAll = $state(false);
   let isPullingAll = $state(false);
   let opResult = $state<string | null>(null);
   let resultTimer: ReturnType<typeof setTimeout>;
+
+  // Run state
+  let isRunning = $state(false);
+  let showRunConfigDialog = $state(false);
+  let showRunDropdown = $state(false);
+
+  // Debug state
+  let isDebugging = $state(false);
+
+  // Listen for run panel status updates
+  import { onMount, onDestroy } from 'svelte';
+  function handleRunning(e: Event) {
+    isRunning = (e as CustomEvent<boolean>).detail;
+  }
+  function handleDebugging(e: Event) {
+    isDebugging = (e as CustomEvent<boolean>).detail;
+  }
+  onMount(() => {
+    window.addEventListener('vaire:run-status', handleRunning);
+    window.addEventListener('vaire:debug-status', handleDebugging);
+  });
+  onDestroy(() => {
+    window.removeEventListener('vaire:run-status', handleRunning);
+    window.removeEventListener('vaire:debug-status', handleDebugging);
+  });
+
+  function getActiveConfig() {
+    const id = $activeRunConfigId;
+    return $runConfigs.find(c => c.id === id) ?? $runConfigs[0] ?? null;
+  }
+
+  async function runActiveConfig() {
+    const config = getActiveConfig();
+    if (!config) {
+      showRunConfigDialog = true;
+      return;
+    }
+    const wsPath = $workspacePath || '.';
+    const cwd = config.cwd === '.' ? wsPath : `${wsPath}/${config.cwd}`;
+    isRunning = true;
+    window.dispatchEvent(new CustomEvent('vaire:run-start', {
+      detail: { command: config.command, cwd, env: config.env },
+    }));
+  }
+
+  function stopRun() {
+    isRunning = false;
+    window.dispatchEvent(new CustomEvent('vaire:run-stop'));
+  }
+
+  function selectConfig(id: string) {
+    activeRunConfigId.set(id);
+    showRunDropdown = false;
+  }
+
+  function debugActiveConfig() {
+    const config = getActiveConfig();
+    if (!config) {
+      showRunConfigDialog = true;
+      return;
+    }
+    const wsPath = $workspacePath || '.';
+    const cwd = config.cwd === '.' ? wsPath : `${wsPath}/${config.cwd}`;
+    activeBottomPanel.set('debug');
+    window.dispatchEvent(new CustomEvent('vaire:debug-start', {
+      detail: { command: config.command, cwd },
+    }));
+  }
+
+  function stopDebug() {
+    window.dispatchEvent(new CustomEvent('vaire:debug-stop'));
+  }
+
+  async function openNewWindow() {
+    try {
+      const selected = await openDialog({ directory: true, multiple: false, title: 'Open Project in New Window' });
+      if (selected && typeof selected === 'string') {
+        await invoke('open_new_window', { workspacePath: selected });
+      }
+    } catch (e) {
+      console.error('Failed to open new window:', e);
+    }
+  }
 
   function showResult(msg: string) {
     clearTimeout(resultTimer);
@@ -80,8 +168,12 @@
   }
 </script>
 
+{#if showRunConfigDialog}
+  <RunConfigDialog onclose={() => { showRunConfigDialog = false; }} />
+{/if}
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="title-bar" onmousedown={handleMouseDown} ondblclick={handleDoubleClick}>
+<div class="title-bar" onmousedown={handleMouseDown} ondblclick={handleDoubleClick} onclick={() => { showRunDropdown = false; }}>
   <div class="traffic-light-space"></div>
 
   <div class="project-info">
@@ -139,11 +231,146 @@
         </svg>
       {/if}
     </button>
-    <button class="title-action-btn run-btn" title="Run">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M4.25 3v10l8.5-5-8.5-5Z"/>
+    <!-- Run controls -->
+    <div class="run-controls">
+      <!-- Stop button (only when running) -->
+      {#if isRunning}
+        <button
+          class="title-action-btn stop-btn"
+          title="Stop"
+          onclick={stopRun}
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="3" y="3" width="10" height="10" rx="1"/>
+          </svg>
+        </button>
+      {/if}
+
+      <!-- Run button -->
+      <button
+        class="title-action-btn run-btn"
+        class:running={isRunning}
+        title={getActiveConfig()?.name ?? 'Run (no config)'}
+        onclick={runActiveConfig}
+        disabled={isRunning}
+      >
+        {#if isRunning}
+          <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+          </svg>
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M4.25 3v10l8.5-5-8.5-5Z"/>
+          </svg>
+        {/if}
+      </button>
+
+      <!-- Dropdown to select config -->
+      <div class="run-dropdown-wrapper">
+        <button
+          class="run-dropdown-btn"
+          title="Select run configuration"
+          onclick={(e) => { e.stopPropagation(); showRunDropdown = !showRunDropdown; }}
+        >
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2 5l6 6 6-6"/>
+          </svg>
+        </button>
+
+        {#if showRunDropdown}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="run-dropdown" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+            {#if $runConfigs.length === 0}
+              <div class="run-dropdown-empty">No configurations</div>
+            {:else}
+              {#each $runConfigs as config}
+                <button
+                  class="run-dropdown-item"
+                  class:active={$activeRunConfigId === config.id}
+                  onclick={() => selectConfig(config.id)}
+                >
+                  {config.name}
+                  <span class="run-dropdown-cmd">{config.command}</span>
+                </button>
+              {/each}
+            {/if}
+            <div class="run-dropdown-separator"></div>
+            <button
+              class="run-dropdown-item"
+              onclick={() => { showRunDropdown = false; showRunConfigDialog = true; }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+              Edit Configurations...
+            </button>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <!-- Debug button -->
+    <div class="run-controls debug-controls-group">
+      {#if isDebugging}
+        <button
+          class="title-action-btn stop-btn"
+          title="Stop Debug"
+          onclick={stopDebug}
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="3" y="3" width="10" height="10" rx="1"/>
+          </svg>
+        </button>
+      {/if}
+      <button
+        class="title-action-btn debug-btn"
+        class:debugging={isDebugging}
+        title="Debug {getActiveConfig()?.name ?? '(no config)'}"
+        onclick={debugActiveConfig}
+        disabled={isDebugging}
+      >
+        {#if isDebugging}
+          <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+          </svg>
+        {:else}
+          <!-- Bug icon -->
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 2a2 2 0 0 1 4 0"/>
+            <path d="M14 2a2 2 0 0 1 4 0"/>
+            <path d="M12 12v6"/>
+            <path d="M8 9h8"/>
+            <path d="M19 9l2-2"/>
+            <path d="M5 9 3 7"/>
+            <path d="M19 14l2 1"/>
+            <path d="M5 14l-2 1"/>
+            <path d="M6 17l-2 2"/>
+            <path d="M18 17l2 2"/>
+            <rect x="6" y="8" width="12" height="12" rx="2"/>
+          </svg>
+        {/if}
+      </button>
+    </div>
+
+    <!-- Open project in new window -->
+    <button
+      class="title-action-btn"
+      title="Open Project in New Window"
+      onclick={openNewWindow}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M3 9h18"/>
+        <path d="M9 3v6"/>
+        <path d="M15 14h3"/>
+        <path d="M15 17h3"/>
+        <path d="M9 14h.01"/>
+        <path d="M9 17h.01"/>
+        <path d="M12 14h.01"/>
+        <path d="M12 17h.01"/>
       </svg>
     </button>
+
     <button class="title-action-btn" title="Search Everywhere (Double Shift)">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
         <circle cx="7" cy="7" r="4.5"/>
@@ -235,12 +462,130 @@
     color: var(--color-text-primary);
   }
 
-  .run-btn:hover {
+  .run-btn:hover:not(:disabled) {
     color: var(--color-success);
+  }
+
+  .run-btn:disabled {
+    cursor: default;
+  }
+
+  .run-controls {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    position: relative;
+  }
+
+  .stop-btn {
+    color: var(--color-error, #f87171);
+  }
+
+  .stop-btn:hover {
+    color: var(--color-error, #f87171);
+    background: rgba(248, 113, 113, 0.15);
+  }
+
+  .run-dropdown-btn {
+    width: 16px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.1s;
+  }
+
+  .run-dropdown-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+  }
+
+  .run-dropdown-wrapper {
+    position: relative;
+  }
+
+  .run-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 4px;
+    min-width: 200px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 500;
+  }
+
+  .run-dropdown-empty {
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
+  .run-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    text-align: left;
+    transition: background 0.1s;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .run-dropdown-item:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .run-dropdown-item.active {
+    background: var(--color-bg-active);
+    color: var(--color-text-primary);
+  }
+
+  .run-dropdown-cmd {
+    font-family: var(--font-editor, monospace);
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .run-dropdown-separator {
+    height: 1px;
+    background: var(--color-border-subtle);
+    margin: 3px 6px;
   }
 
   .title-action-btn:disabled {
     opacity: 0.5;
+    cursor: default;
+  }
+
+  .debug-controls-group {
+    margin-left: 2px;
+    padding-left: 4px;
+    border-left: 1px solid var(--color-border-subtle);
+  }
+
+  .debug-btn:hover:not(:disabled) {
+    color: #f87171;
+  }
+
+  .debug-btn:disabled {
     cursor: default;
   }
 

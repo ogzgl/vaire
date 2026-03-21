@@ -1,12 +1,20 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { openTabs, activeTabIndex, closeTab, workspacePath, openWorkspace, gitRepos, type OpenTab } from '$lib/stores/workspace';
+  import { openTabs, activeTabIndex, closeTab, workspacePath, openWorkspace, gitRepos, pinTab, unpinTab, loadPinnedPaths, type OpenTab } from '$lib/stores/workspace';
   import { recentProjects } from '$lib/stores/recent';
   import MonacoEditor from './MonacoEditor.svelte';
   import MonacoDiffEditor from './MonacoDiffEditor.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { getFileIconSvg } from '$lib/utils/fileIcons';
   import { invoke } from '@tauri-apps/api/core';
+
+  // Scratch language chooser
+  let showScratchLangPicker = $state(false);
+  const SCRATCH_LANGUAGES = [
+    'plaintext', 'typescript', 'javascript', 'python', 'rust', 'go',
+    'java', 'kotlin', 'html', 'css', 'json', 'yaml', 'sql', 'shell',
+    'markdown', 'ruby', 'cpp', 'c', 'csharp',
+  ];
 
   // ─── Split pane model ───────────────────────────────────────────
   interface EditorPane {
@@ -33,12 +41,121 @@
   let paneWidths = $state<number[]>([]); // percentages summing to 100
   let isDraggingDivider = $state<number | null>(null); // index of divider being dragged
 
+  // Tab context menu
+  let tabContextMenu = $state<{
+    x: number;
+    y: number;
+    paneIdx: number;
+    tabIdx: number;
+    tab: OpenTab;
+  } | null>(null);
+
+  function openTabContextMenu(e: MouseEvent, paneIdx: number, tabIdx: number, tab: OpenTab) {
+    e.preventDefault();
+    e.stopPropagation();
+    tabContextMenu = { x: e.clientX, y: e.clientY, paneIdx, tabIdx, tab };
+  }
+
+  function closeTabContextMenu() {
+    tabContextMenu = null;
+  }
+
+  function ctxPinTab() {
+    if (!tabContextMenu) return;
+    const { tab, paneIdx } = tabContextMenu;
+    // Pin in global workspace store
+    pinTab(tab.path);
+    // Update all panes that have this tab
+    for (const pane of panes) {
+      const idx = pane.tabs.findIndex(t => t.path === tab.path);
+      if (idx >= 0) pane.tabs[idx] = { ...pane.tabs[idx], pinned: true };
+    }
+    // Re-sort pane 0 tabs: pinned first
+    sortPaneTabs(paneIdx);
+    panes = [...panes];
+    closeTabContextMenu();
+  }
+
+  function ctxUnpinTab() {
+    if (!tabContextMenu) return;
+    const { tab, paneIdx } = tabContextMenu;
+    unpinTab(tab.path);
+    for (const pane of panes) {
+      const idx = pane.tabs.findIndex(t => t.path === tab.path);
+      if (idx >= 0) pane.tabs[idx] = { ...pane.tabs[idx], pinned: false };
+    }
+    sortPaneTabs(paneIdx);
+    panes = [...panes];
+    closeTabContextMenu();
+  }
+
+  function sortPaneTabs(paneIdx: number) {
+    const pane = panes[paneIdx];
+    if (!pane) return;
+    const active = pane.tabs[pane.activeTabIndex];
+    const pinned = pane.tabs.filter(t => t.pinned);
+    const unpinned = pane.tabs.filter(t => !t.pinned);
+    pane.tabs = [...pinned, ...unpinned];
+    // Restore active tab index after sort
+    if (active) {
+      const newIdx = pane.tabs.findIndex(t => t.path === active.path);
+      pane.activeTabIndex = newIdx >= 0 ? newIdx : 0;
+    }
+  }
+
+  function ctxCloseTab() {
+    if (!tabContextMenu) return;
+    const { paneIdx, tabIdx, tab } = tabContextMenu;
+    if (tab.pinned) return; // Can't close pinned tabs
+    closePaneTab(paneIdx, tabIdx);
+    closeTabContextMenu();
+  }
+
+  function ctxCloseOthers() {
+    if (!tabContextMenu) return;
+    const { paneIdx, tab } = tabContextMenu;
+    const pane = panes[paneIdx];
+    // Keep pinned tabs and the selected tab
+    pane.tabs = pane.tabs.filter(t => t.pinned || t.path === tab.path);
+    pane.activeTabIndex = pane.tabs.findIndex(t => t.path === tab.path);
+    if (pane.activeTabIndex < 0) pane.activeTabIndex = 0;
+    panes = [...panes];
+    if (paneIdx === 0) {
+      openTabs.set(panes[0].tabs);
+      activeTabIndex.set(panes[0].activeTabIndex);
+    }
+    closeTabContextMenu();
+  }
+
+  function ctxCloseAll() {
+    if (!tabContextMenu) return;
+    const { paneIdx } = tabContextMenu;
+    const pane = panes[paneIdx];
+    // Keep pinned tabs
+    pane.tabs = pane.tabs.filter(t => t.pinned);
+    pane.activeTabIndex = pane.tabs.length > 0 ? 0 : -1;
+    panes = [...panes];
+    if (paneIdx === 0) {
+      openTabs.set(panes[0].tabs);
+      activeTabIndex.set(panes[0].activeTabIndex);
+    }
+    closeTabContextMenu();
+  }
+
   // Sync the existing workspace openTabs/activeTabIndex into pane 0 on first load
   $effect(() => {
     const tabs = $openTabs;
     const idx = $activeTabIndex;
     if (panes.length === 0) {
-      panes = [{ tabs: tabs.slice(), activeTabIndex: Math.max(0, idx) }];
+      // Apply pinned state from localStorage
+      const pinnedPaths = new Set(loadPinnedPaths());
+      const hydratedTabs = tabs.map(t => ({ ...t, pinned: pinnedPaths.has(t.path) }));
+      // Sort: pinned first
+      const sortedTabs = [
+        ...hydratedTabs.filter(t => t.pinned),
+        ...hydratedTabs.filter(t => !t.pinned),
+      ];
+      panes = [{ tabs: sortedTabs, activeTabIndex: Math.max(0, idx) }];
       paneWidths = [100];
     } else {
       // Keep pane 0 in sync with the global store (for backwards compat with other panels)
@@ -77,6 +194,8 @@
 
   function closePaneTab(paneIdx: number, tabIdx: number) {
     const pane = panes[paneIdx];
+    // Don't close pinned tabs
+    if (pane.tabs[tabIdx]?.pinned) return;
     const newTabs = pane.tabs.filter((_, i) => i !== tabIdx);
     let newActive = pane.activeTabIndex;
     if (newTabs.length === 0) {
@@ -288,11 +407,54 @@
     window.addEventListener('mouseup', onMouseUp);
   }
 
-  // ─── Keyboard shortcut: Cmd+\ to split ──────────────────────────
+  async function createScratchFile(language: string) {
+    showScratchLangPicker = false;
+    try {
+      const scratchPath = await invoke<string>('create_scratch', { language });
+      const name = scratchPath.split('/').pop() || 'scratch';
+      const newTab: OpenTab = {
+        path: scratchPath,
+        name,
+        lang: language,
+        content: '',
+        isScratch: true,
+      };
+      const pane = panes[activePaneIndex] || panes[0];
+      if (pane) {
+        pane.tabs.push(newTab);
+        pane.activeTabIndex = pane.tabs.length - 1;
+        if (activePaneIndex === 0 || panes.length === 1) {
+          openTabs.set(panes[0].tabs);
+          activeTabIndex.set(panes[0].activeTabIndex);
+        }
+        panes = [...panes];
+      }
+    } catch (e) {
+      console.error('Failed to create scratch file:', e);
+    }
+  }
+
+  // ─── Keyboard shortcut: Cmd+\ to split, Cmd+W to close ──────────────────────────
   function handleGlobalKey(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
       e.preventDefault();
       addPane();
+    }
+    // Cmd+W: close current tab if not pinned
+    if ((e.metaKey || e.ctrlKey) && e.key === 'w') {
+      const pane = panes[activePaneIndex];
+      if (pane) {
+        const tab = pane.tabs[pane.activeTabIndex];
+        if (tab && !tab.pinned) {
+          e.preventDefault();
+          closePaneTab(activePaneIndex, pane.activeTabIndex);
+        }
+      }
+    }
+    // Cmd+Shift+N: new scratch file
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'n') {
+      e.preventDefault();
+      showScratchLangPicker = true;
     }
   }
 
@@ -345,16 +507,27 @@
     }
   }
 
+  function handleWindowClick() {
+    if (tabContextMenu) closeTabContextMenu();
+  }
+
+  function handleWindowKeydown(e: KeyboardEvent) {
+    handleGlobalKey(e);
+    if (e.key === 'Escape' && tabContextMenu) closeTabContextMenu();
+  }
+
   onMount(() => {
-    window.addEventListener('keydown', handleGlobalKey);
+    window.addEventListener('keydown', handleWindowKeydown);
     window.addEventListener('vaire:toggle-blame', handleBlameToggle);
     window.addEventListener('vaire:open-file', handleOpenFilePath);
+    window.addEventListener('click', handleWindowClick);
   });
 
   onDestroy(() => {
-    window.removeEventListener('keydown', handleGlobalKey);
+    window.removeEventListener('keydown', handleWindowKeydown);
     window.removeEventListener('vaire:toggle-blame', handleBlameToggle);
     window.removeEventListener('vaire:open-file', handleOpenFilePath);
+    window.removeEventListener('click', handleWindowClick);
   });
 
   // ─── Icon helpers ────────────────────────────────────────────────
@@ -362,6 +535,11 @@
     if (tab.isDiff) {
       return `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="color: var(--color-accent)">
         <path d="M6 7h2.79l-1.147 1.146a.5.5 0 0 0 .707.708l2-1.999.007-.007.006-.006a.5.5 0 0 0-.006-.706l-2-2a.5.5 0 0 0-.707.707L8.79 6H6a1 1 0 0 1-1-1V3.5a.5.5 0 0 0-1 0V5a2 2 0 0 0 2 2"/>
+      </svg>`;
+    }
+    if (tab.isScratch) {
+      return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-warning, #f59e0b)">
+        <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/>
       </svg>`;
     }
     return getFileIconSvg(tab.lang, 'file');
@@ -490,18 +668,34 @@
                 <div
                   class="tab"
                   class:active={pane.activeTabIndex === i}
+                  class:pinned={tab.pinned}
                   onclick={(e) => { e.stopPropagation(); setActivePaneTab(paneIdx, i); }}
                   onmousedown={(e) => onTabMouseDown(e, paneIdx, i, tab)}
+                  oncontextmenu={(e) => openTabContextMenu(e, paneIdx, i, tab)}
                   role="tab"
                   tabindex="0"
                 >
                   <span class="tab-icon">{@html getTabIcon(tab)}</span>
                   <span class="tab-name">{tab.name}</span>
-                  <button class="tab-close" onclick={(e) => { e.stopPropagation(); closePaneTab(paneIdx, i); }} aria-label="Close tab">
-                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                    </svg>
-                  </button>
+                  {#if tab.pinned}
+                    <!-- Pin icon: click to unpin -->
+                    <button
+                      class="tab-pin-btn"
+                      onclick={(e) => { e.stopPropagation(); unpinTab(tab.path); for (const p of panes) { const idx = p.tabs.findIndex(t => t.path === tab.path); if (idx >= 0) p.tabs[idx] = { ...p.tabs[idx], pinned: false }; } sortPaneTabs(paneIdx); panes = [...panes]; }}
+                      title="Unpin tab"
+                      aria-label="Unpin tab"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M16 3a1 1 0 0 0-1 1v4.586l-1.293-1.293a1 1 0 0 0-1.414 1.414L13.586 10H9a1 1 0 0 0-.707 1.707L12 15.414V20a1 1 0 0 0 1.707.707l4-4A1 1 0 0 0 18 16v-4.586l1.293 1.293a1 1 0 0 0 1.414-1.414L16.414 8H20a1 1 0 0 0 .707-1.707L17 2.586A1 1 0 0 0 16 3z"/>
+                      </svg>
+                    </button>
+                  {:else}
+                    <button class="tab-close" onclick={(e) => { e.stopPropagation(); closePaneTab(paneIdx, i); }} aria-label="Close tab">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                      </svg>
+                    </button>
+                  {/if}
                 </div>
               {/each}
               <!-- Split button -->
@@ -580,6 +774,87 @@
     </div>
   {/if}
 </div>
+
+<!-- Scratch language picker -->
+{#if showScratchLangPicker}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div class="dialog-backdrop" onclick={() => { showScratchLangPicker = false; }} onkeydown={(e) => e.key === 'Escape' && (showScratchLangPicker = false)} role="dialog" aria-modal="true">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="scratch-picker" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <div class="scratch-picker-header">
+        <span>New Scratch File</span>
+        <button onclick={() => { showScratchLangPicker = false; }} aria-label="Close">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="scratch-lang-grid">
+        {#each SCRATCH_LANGUAGES as lang}
+          <button class="scratch-lang-btn" onclick={() => createScratchFile(lang)}>
+            {@html getFileIconSvg(lang, 'file')}
+            <span>{lang}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Tab context menu -->
+{#if tabContextMenu}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="tab-context-menu"
+    style="left: {tabContextMenu.x}px; top: {tabContextMenu.y}px"
+    onclick={(e) => e.stopPropagation()}
+    onkeydown={(e) => e.stopPropagation()}
+    role="menu"
+  >
+    {#if tabContextMenu.tab.pinned}
+      <button class="ctx-item" role="menuitem" onclick={ctxUnpinTab}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M16 3a1 1 0 0 0-1 1v4.586l-1.293-1.293a1 1 0 0 0-1.414 1.414L13.586 10H9a1 1 0 0 0-.707 1.707L12 15.414V20a1 1 0 0 0 1.707.707l4-4A1 1 0 0 0 18 16v-4.586l1.293 1.293a1 1 0 0 0 1.414-1.414L16.414 8H20a1 1 0 0 0 .707-1.707L17 2.586A1 1 0 0 0 16 3z"/>
+        </svg>
+        Unpin Tab
+      </button>
+    {:else}
+      <button class="ctx-item" role="menuitem" onclick={ctxPinTab}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M16 3a1 1 0 0 0-1 1v4.586l-1.293-1.293a1 1 0 0 0-1.414 1.414L13.586 10H9a1 1 0 0 0-.707 1.707L12 15.414V20a1 1 0 0 0 1.707.707l4-4A1 1 0 0 0 18 16v-4.586l1.293 1.293a1 1 0 0 0 1.414-1.414L16.414 8H20a1 1 0 0 0 .707-1.707L17 2.586A1 1 0 0 0 16 3z"/>
+        </svg>
+        Pin Tab
+      </button>
+    {/if}
+    <div class="ctx-separator"></div>
+    <button class="ctx-item" role="menuitem" onclick={ctxCloseTab} disabled={tabContextMenu.tab.pinned}>
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+      </svg>
+      Close
+    </button>
+    <button class="ctx-item" role="menuitem" onclick={ctxCloseOthers}>Close Others</button>
+    <button class="ctx-item" role="menuitem" onclick={ctxCloseAll}>Close All</button>
+    {#if !tabContextMenu.tab.isDiff && !tabContextMenu.tab.isScratch}
+      <div class="ctx-separator"></div>
+      <button
+        class="ctx-item"
+        role="menuitem"
+        onclick={() => {
+          if (tabContextMenu) {
+            window.dispatchEvent(new CustomEvent('vaire:show-local-history', { detail: { path: tabContextMenu.tab.path } }));
+          }
+          closeTabContextMenu();
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        Show Local History
+      </button>
+    {/if}
+  </div>
+{/if}
 
 <!-- Floating tab ghost while dragging -->
 {#if tabDrag?.active}
@@ -1003,6 +1278,161 @@
 
   .tab-close:hover {
     background: var(--color-bg-active);
+    color: var(--color-text-primary);
+  }
+
+  /* Pinned tab */
+  .tab.pinned {
+    border-bottom-color: var(--color-warning, #f59e0b);
+  }
+
+  .tab-pin-btn {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: none;
+    background: transparent;
+    color: var(--color-warning, #f59e0b);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: all 0.1s ease;
+    padding: 0;
+    flex-shrink: 0;
+  }
+
+  .tab:hover .tab-pin-btn {
+    opacity: 1;
+  }
+
+  .tab-pin-btn:hover {
+    background: var(--color-bg-active);
+    opacity: 1;
+  }
+
+  /* Tab context menu */
+  .tab-context-menu {
+    position: fixed;
+    z-index: 2000;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 4px;
+    min-width: 160px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .ctx-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    text-align: left;
+    transition: background 0.1s;
+  }
+
+  .ctx-item:hover:not(:disabled) {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .ctx-item:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .ctx-separator {
+    height: 1px;
+    background: var(--color-border-subtle);
+    margin: 3px 6px;
+  }
+
+  /* Scratch picker dialog */
+  .dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(2px);
+  }
+
+  .scratch-picker {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    width: 380px;
+    max-width: 96vw;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+  }
+
+  .scratch-picker-header {
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .scratch-picker-header button {
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .scratch-picker-header button:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .scratch-lang-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+    padding: 8px;
+  }
+
+  .scratch-lang-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 6px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s;
+  }
+
+  .scratch-lang-btn:hover {
+    background: var(--color-bg-hover);
     color: var(--color-text-primary);
   }
 

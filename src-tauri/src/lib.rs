@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{Emitter, Manager, State};
@@ -818,6 +819,75 @@ fn git_command(repo_path: String, args: Vec<String>) -> Result<String, String> {
     git_cmd(&repo_path, &str_args)
 }
 
+// ============================================
+// Git Stash
+// ============================================
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StashEntry {
+    pub index: u32,
+    pub message: String,
+    pub date: String,
+}
+
+#[tauri::command]
+fn git_stash_save(repo_path: String, message: String, include_untracked: bool) -> Result<String, String> {
+    let mut args = vec!["stash", "push", "-m", &message];
+    if include_untracked {
+        args.push("-u");
+    }
+    git_cmd(&repo_path, &args)
+}
+
+#[tauri::command]
+fn git_stash_list(repo_path: String) -> Result<Vec<StashEntry>, String> {
+    let output = git_cmd(
+        &repo_path,
+        &["stash", "list", "--pretty=format:%gd|%s|%ar"],
+    )?;
+
+    let entries = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .enumerate()
+        .map(|(i, line)| {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            let index_str = parts.first().unwrap_or(&"stash@{0}");
+            // Extract numeric index from "stash@{N}"
+            let index = index_str
+                .trim_start_matches("stash@{")
+                .trim_end_matches('}')
+                .parse::<u32>()
+                .unwrap_or(i as u32);
+            StashEntry {
+                index,
+                message: parts.get(1).unwrap_or(&"").to_string(),
+                date: parts.get(2).unwrap_or(&"").to_string(),
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn git_stash_apply(repo_path: String, index: u32) -> Result<String, String> {
+    let stash_ref = format!("stash@{{{}}}", index);
+    git_cmd(&repo_path, &["stash", "apply", &stash_ref])
+}
+
+#[tauri::command]
+fn git_stash_pop(repo_path: String, index: u32) -> Result<String, String> {
+    let stash_ref = format!("stash@{{{}}}", index);
+    git_cmd(&repo_path, &["stash", "pop", &stash_ref])
+}
+
+#[tauri::command]
+fn git_stash_drop(repo_path: String, index: u32) -> Result<String, String> {
+    let stash_ref = format!("stash@{{{}}}", index);
+    git_cmd(&repo_path, &["stash", "drop", &stash_ref])
+}
+
 #[tauri::command]
 async fn git_fetch(repo_path: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -910,6 +980,384 @@ fn delete_path(path: String) -> Result<(), String> {
 }
 
 // ============================================
+// Local History
+// ============================================
+
+fn vaire_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".vaire")
+}
+
+fn history_dir_for(file_path: &str) -> PathBuf {
+    // Use a simple hash of the path as the directory name
+    let hash = format!("{:x}", {
+        let mut h: u64 = 14695981039346656037;
+        for byte in file_path.bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    });
+    vaire_dir().join("history").join(hash)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct HistoryEntry {
+    pub timestamp: i64,
+    pub size: u64,
+}
+
+#[tauri::command]
+fn save_local_history(file_path: String, content: String) -> Result<(), String> {
+    let dir = history_dir_for(&file_path);
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create history dir: {}", e))?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+
+    let snapshot_path = dir.join(format!("{}.txt", ts));
+    fs::write(&snapshot_path, &content)
+        .map_err(|e| format!("Failed to write history snapshot: {}", e))?;
+
+    // Also store the original path as metadata
+    let meta_path = dir.join("path.txt");
+    if !meta_path.exists() {
+        fs::write(&meta_path, &file_path).ok();
+    }
+
+    // Keep only the latest 50 snapshots
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("txt")
+                && p.file_stem().and_then(|s| s.to_str()).map(|s| s.parse::<i64>().is_ok()).unwrap_or(false)
+        })
+        .collect();
+
+    if entries.len() > 50 {
+        entries.sort();
+        let to_delete = entries.len() - 50;
+        for path in entries.iter().take(to_delete) {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_local_history(file_path: String) -> Result<Vec<HistoryEntry>, String> {
+    let dir = history_dir_for(&file_path);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut entries: Vec<HistoryEntry> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let ext = path.extension().and_then(|x| x.to_str())?;
+            if ext != "txt" { return None; }
+            let stem = path.file_stem().and_then(|s| s.to_str())?;
+            let ts: i64 = stem.parse().ok()?;
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Some(HistoryEntry { timestamp: ts, size })
+        })
+        .collect();
+
+    // Most recent first
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(entries)
+}
+
+#[tauri::command]
+fn get_local_history_content(file_path: String, timestamp: i64) -> Result<String, String> {
+    let dir = history_dir_for(&file_path);
+    let snapshot_path = dir.join(format!("{}.txt", timestamp));
+    if !snapshot_path.exists() {
+        return Err(format!("Snapshot not found: {}", timestamp));
+    }
+    fs::read_to_string(&snapshot_path).map_err(|e| format!("Failed to read snapshot: {}", e))
+}
+
+// ============================================
+// Scratch Files
+// ============================================
+
+fn scratches_dir() -> PathBuf {
+    vaire_dir().join("scratches")
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ScratchInfo {
+    pub path: String,
+    pub name: String,
+    pub language: String,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+fn create_scratch(language: String) -> Result<String, String> {
+    let dir = scratches_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create scratches dir: {}", e))?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+
+    let ext = match language.as_str() {
+        "typescript" => "ts",
+        "javascript" => "js",
+        "python" => "py",
+        "rust" => "rs",
+        "go" => "go",
+        "java" => "java",
+        "kotlin" => "kt",
+        "html" => "html",
+        "css" => "css",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "sql" => "sql",
+        "shell" | "bash" => "sh",
+        "markdown" => "md",
+        "ruby" => "rb",
+        "cpp" => "cpp",
+        "c" => "c",
+        "csharp" => "cs",
+        _ => "txt",
+    };
+
+    let name = format!("scratch-{}.{}", ts, ext);
+    let path = dir.join(&name);
+    fs::write(&path, "").map_err(|e| format!("Failed to create scratch file: {}", e))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn list_scratches() -> Result<Vec<ScratchInfo>, String> {
+    let dir = scratches_dir();
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut scratches: Vec<ScratchInfo> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() { return None; }
+            let name = path.file_name()?.to_str()?.to_string();
+            if !name.starts_with("scratch-") { return None; }
+
+            // Parse timestamp from filename
+            let stem = path.file_stem()?.to_str()?;
+            let parts: Vec<&str> = stem.splitn(2, '-').collect();
+            let ts: i64 = if parts.len() >= 2 {
+                parts[1].parse().unwrap_or(0)
+            } else {
+                0
+            };
+
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+            let language = match ext {
+                "ts" => "typescript",
+                "js" => "javascript",
+                "py" => "python",
+                "rs" => "rust",
+                "go" => "go",
+                "java" => "java",
+                "kt" => "kotlin",
+                "html" => "html",
+                "css" => "css",
+                "json" => "json",
+                "yaml" | "yml" => "yaml",
+                "sql" => "sql",
+                "sh" => "shell",
+                "md" => "markdown",
+                "rb" => "ruby",
+                "cpp" => "cpp",
+                "c" => "c",
+                "cs" => "csharp",
+                _ => "plaintext",
+            };
+
+            Some(ScratchInfo {
+                path: path.to_string_lossy().to_string(),
+                name,
+                language: language.to_string(),
+                created_at: ts,
+            })
+        })
+        .collect();
+
+    scratches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(scratches)
+}
+
+// ============================================
+// Workspace Settings
+// ============================================
+
+#[tauri::command]
+fn load_workspace_settings(workspace_path: String) -> Result<String, String> {
+    let settings_path = PathBuf::from(&workspace_path).join(".vaire").join("settings.json");
+    if !settings_path.exists() {
+        return Ok("{}".to_string());
+    }
+    fs::read_to_string(&settings_path)
+        .map_err(|e| format!("Failed to read workspace settings: {}", e))
+}
+
+#[tauri::command]
+fn save_workspace_settings(workspace_path: String, settings: String) -> Result<(), String> {
+    let vaire_dir = PathBuf::from(&workspace_path).join(".vaire");
+    fs::create_dir_all(&vaire_dir)
+        .map_err(|e| format!("Failed to create .vaire directory: {}", e))?;
+    let settings_path = vaire_dir.join("settings.json");
+    fs::write(&settings_path, &settings)
+        .map_err(|e| format!("Failed to write workspace settings: {}", e))
+}
+
+// ============================================
+// Debug (simplified: spawn with output capture)
+// ============================================
+
+struct DebugState {
+    processes: Mutex<HashMap<u32, Child>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DebugBreakpoint {
+    pub file_path: String,
+    pub line: u32,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+async fn debug_start(
+    cwd: String,
+    command: String,
+    args: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DebugState>,
+) -> Result<u32, String> {
+    let mut parts = command.split_whitespace();
+    let program = parts.next().ok_or("Empty command")?;
+    let mut cmd_args: Vec<String> = parts.map(|s| s.to_string()).collect();
+    cmd_args.extend(args);
+
+    let mut child = Command::new(program)
+        .args(&cmd_args)
+        .current_dir(&cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn debug target: {}", e))?;
+
+    let pid = child.id();
+
+    // Read stdout and emit events
+    if let Some(stdout) = child.stdout.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let _ = app_clone.emit("debug-output", format!("{}\n", l));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let _ = app_clone.emit("debug-output", format!("\x1b[31m{}\x1b[0m\n", l));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // Insert child into state
+    {
+        let mut procs = state.processes.lock().unwrap();
+        procs.insert(pid, child);
+    }
+
+    // Spawn a thread that polls until the process exits, then emits debug-stopped
+    let app_wait = app.clone();
+    let pid_for_wait = pid;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Check if process is still running by attempting `kill -0 <pid>`
+            let still_running = Command::new("kill")
+                .args(["-0", &pid_for_wait.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !still_running {
+                let _ = app_wait.emit("debug-stopped", pid_for_wait);
+                break;
+            }
+        }
+    });
+
+    Ok(pid)
+}
+
+#[tauri::command]
+fn debug_stop(pid: u32, state: tauri::State<'_, DebugState>) -> Result<(), String> {
+    let mut procs = state.processes.lock().unwrap();
+    if let Some(mut child) = procs.remove(&pid) {
+        child.kill().map_err(|e| format!("Failed to kill debug process: {}", e))?;
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
+// ============================================
+// Multi-Window Support
+// ============================================
+
+#[tauri::command]
+fn open_new_window(app: tauri::AppHandle, workspace_path: String) -> Result<(), String> {
+    let label = format!(
+        "project-{}",
+        workspace_path
+            .replace('/', "-")
+            .replace('.', "")
+            .trim_start_matches('-')
+            .to_string()
+    );
+    let project_name = workspace_path.split('/').last().unwrap_or(&workspace_path);
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("/".into()))
+        .title(&format!("Vaire \u{2014} {}", project_name))
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(900.0, 600.0)
+        .decorations(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ============================================
 // App Init
 // ============================================
 
@@ -921,6 +1369,9 @@ pub fn run() {
         .manage(TerminalState {
             writers: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
+        })
+        .manage(DebugState {
+            processes: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             read_directory,
@@ -945,6 +1396,21 @@ pub fn run() {
             create_directory,
             rename_path,
             delete_path,
+            save_local_history,
+            get_local_history,
+            get_local_history_content,
+            create_scratch,
+            list_scratches,
+            git_stash_save,
+            git_stash_list,
+            git_stash_apply,
+            git_stash_pop,
+            git_stash_drop,
+            load_workspace_settings,
+            save_workspace_settings,
+            debug_start,
+            debug_stop,
+            open_new_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

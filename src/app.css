@@ -53,3 +53,51 @@ html, body {
   background: var(--color-accent-subtle);
   color: var(--color-text-primary);
 }
+
+/* ============================================
+   Smooth Animations & Transitions
+   ============================================ */
+
+/* Panel resize transitions — sidebar width & bottom panel height */
+.sidebar-container {
+  transition: width 0.08s ease;
+}
+
+/* Sidebar panel switching — fade between panels */
+.sidebar-panel {
+  animation: panelFadeIn 0.15s ease-out;
+}
+
+@keyframes panelFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Bottom panel: slide up when opening */
+.bottom-panel {
+  animation: slideUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Toast slide-in from right */
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Activity bar icon hover scale */
+.activity-btn {
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease !important;
+}
+
+.activity-btn:hover {
+  transform: scale(1.1);
+}
+
+.activity-btn:active {
+  transform: scale(0.95);
+}

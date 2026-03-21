@@ -1,16 +1,54 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { activeBottomPanel, bottomPanelHeight } from '$lib/stores/app';
   import Terminal from './Terminal.svelte';
   import GitLog from './GitLog.svelte';
   import TodoPanel from './TodoPanel.svelte';
+  import RunPanel from './RunPanel.svelte';
+  import DebugPanel from './DebugPanel.svelte';
 
   let terminalMounted = $state(false);
+  let runMounted = $state(false);
+  let debugMounted = $state(false);
   let isResizing = $state(false);
+
+  // Expose run panel ref so TitleBar can call startRun/stopRun
+  let runPanelRef: RunPanel | undefined = $state(undefined);
 
   $effect(() => {
     if ($activeBottomPanel === 'terminal' && !terminalMounted) {
       terminalMounted = true;
     }
+    if ($activeBottomPanel === 'run' && !runMounted) {
+      runMounted = true;
+    }
+    if ($activeBottomPanel === 'debug' && !debugMounted) {
+      debugMounted = true;
+    }
+  });
+
+  // Listen for run trigger events from TitleBar
+  function handleRunStart(e: Event) {
+    const { command, cwd, env } = (e as CustomEvent<{ command: string; cwd: string; env?: Record<string, string> }>).detail;
+    activeBottomPanel.set('run');
+    runMounted = true;
+    // Give the panel a tick to mount before calling startRun
+    setTimeout(() => {
+      runPanelRef?.startRun(command, cwd, env);
+    }, 100);
+  }
+
+  function handleRunStop() {
+    runPanelRef?.stopRun();
+  }
+
+  onMount(() => {
+    window.addEventListener('vaire:run-start', handleRunStart);
+    window.addEventListener('vaire:run-stop', handleRunStop);
+  });
+  onDestroy(() => {
+    window.removeEventListener('vaire:run-start', handleRunStart);
+    window.removeEventListener('vaire:run-stop', handleRunStop);
   });
 
   function startResize(e: MouseEvent) {
@@ -50,6 +88,13 @@
         </button>
         <button
           class="bottom-tab"
+          class:active={$activeBottomPanel === 'run'}
+          onclick={() => activeBottomPanel.set('run')}
+        >
+          Run
+        </button>
+        <button
+          class="bottom-tab"
           class:active={$activeBottomPanel === 'git-log'}
           onclick={() => activeBottomPanel.set('git-log')}
         >
@@ -62,6 +107,13 @@
         >
           TODO
         </button>
+        <button
+          class="bottom-tab"
+          class:active={$activeBottomPanel === 'debug'}
+          onclick={() => activeBottomPanel.set('debug')}
+        >
+          Debug
+        </button>
       </div>
       <button class="bottom-close" onclick={() => activeBottomPanel.set(null)} aria-label="Close panel">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -71,14 +123,33 @@
     </div>
 
     <div class="bottom-panel-content">
-      {#if $activeBottomPanel === 'terminal'}
-        {#if terminalMounted}
+      <!-- Terminal: keep mounted once opened -->
+      {#if terminalMounted}
+        <div class="panel-slot" class:visible={$activeBottomPanel === 'terminal'}>
           <Terminal />
-        {/if}
-      {:else if $activeBottomPanel === 'git-log'}
+        </div>
+      {:else if $activeBottomPanel === 'terminal'}
+        <Terminal />
+      {/if}
+
+      <!-- Run: keep mounted once opened -->
+      {#if runMounted}
+        <div class="panel-slot" class:visible={$activeBottomPanel === 'run'}>
+          <RunPanel bind:this={runPanelRef} />
+        </div>
+      {/if}
+
+      {#if $activeBottomPanel === 'git-log'}
         <GitLog />
       {:else if $activeBottomPanel === 'todo'}
         <TodoPanel />
+      {/if}
+
+      <!-- Debug: keep mounted once opened -->
+      {#if debugMounted}
+        <div class="panel-slot" class:visible={$activeBottomPanel === 'debug'}>
+          <DebugPanel />
+        </div>
       {/if}
     </div>
   </div>
@@ -168,5 +239,18 @@
   .bottom-panel-content {
     flex: 1;
     overflow: hidden;
+    position: relative;
+  }
+
+  .panel-slot {
+    position: absolute;
+    inset: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .panel-slot.visible {
+    visibility: visible;
+    pointer-events: auto;
   }
 </style>

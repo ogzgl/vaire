@@ -1,6 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { addRecentProject } from './recent';
+import { loadWorkspaceSettings } from './workspaceSettings';
 
 export interface FileNode {
   name: string;
@@ -21,6 +22,8 @@ export interface OpenTab {
   diffRepoPath?: string;
   diffFilePath?: string;
   diffStaged?: boolean;
+  pinned?: boolean;
+  isScratch?: boolean;
 }
 
 export const workspacePath = writable<string | null>(null);
@@ -61,6 +64,9 @@ export async function openWorkspace(path: string) {
 
     const repos: string[] = await invoke('get_git_repos', { path });
     gitRepos.set(repos);
+
+    // Load per-project settings from .vaire/settings.json
+    await loadWorkspaceSettings(path);
   } catch (e) {
     console.error('Failed to open workspace:', e);
   }
@@ -141,5 +147,40 @@ export function toggleNode(tree: FileNode[], path: string): FileNode[] {
       return { ...node, children: toggleNode(node.children, path) };
     }
     return node;
+  });
+}
+
+// ─── Pinned tabs persistence ─────────────────────────────────────────────────
+
+const PINNED_TABS_KEY = 'vaire:pinned-tabs';
+
+export function loadPinnedPaths(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_TABS_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [];
+  }
+}
+
+export function savePinnedPaths(tabs: OpenTab[]) {
+  const paths = tabs.filter(t => t.pinned).map(t => t.path);
+  localStorage.setItem(PINNED_TABS_KEY, JSON.stringify(paths));
+}
+
+export function pinTab(path: string) {
+  openTabs.update(tabs => {
+    const updated = tabs.map(t => t.path === path ? { ...t, pinned: true } : t);
+    savePinnedPaths(updated);
+    return updated;
+  });
+}
+
+export function unpinTab(path: string) {
+  openTabs.update(tabs => {
+    const updated = tabs.map(t => t.path === path ? { ...t, pinned: false } : t);
+    savePinnedPaths(updated);
+    return updated;
   });
 }

@@ -34,6 +34,7 @@
           </svg>
         </span>
         <span class="title-text">Diff: {$diffDialogState.fileName}</span>
+        <span class="title-path">{$diffDialogState.filePath}</span>
         <span class="title-meta">
           {$diffDialogState.staged ? 'staged' : 'unstaged'} · {$diffDialogState.repoPath.split('/').pop()}
         </span>
@@ -45,7 +46,7 @@
         </button>
       </div>
 
-      <!-- Diff editor -->
+      <!-- Diff editor (includes its own toolbar with accept/reject) -->
       <div class="diff-body">
         {#key `${$diffDialogState.repoPath}:${$diffDialogState.filePath}:${$diffDialogState.staged}`}
           <MonacoDiffEditor
@@ -78,7 +79,7 @@
 
   .diff-dialog {
     width: 900px;
-    height: 550px;
+    height: 580px;
     max-width: calc(100vw - 48px);
     max-height: calc(100vh - 80px);
     background: var(--color-bg-elevated);
@@ -105,6 +106,7 @@
     background: var(--color-bg-surface);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
+    min-width: 0;
   }
 
   .diff-icon {
@@ -119,8 +121,18 @@
     font-weight: 600;
     color: var(--color-text-primary);
     white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .title-path {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-family: var(--font-editor, monospace);
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
   }
 
   .title-meta {
@@ -131,7 +143,7 @@
   }
 
   .close-btn {
-    margin-left: auto;
+    margin-left: 4px;
     width: 24px;
     height: 24px;
     display: flex;

@@ -20,7 +20,16 @@
     expanded: boolean;
   }
 
+  interface StashEntry {
+    index: number;
+    message: string;
+    date: string;
+  }
+
+  type ActiveTab = 'commit' | 'stash';
+
   let isOpen = $state(false);
+  let activeTab = $state<ActiveTab>('commit');
   let commitMessage = $state('');
   let repoChanges = $state<RepoChanges[]>([]);
   let isCommitting = $state(false);
@@ -29,6 +38,14 @@
   let textareaEl: HTMLTextAreaElement;
   let selectedFile = $state<{ repoPath: string; file: GitChangedFile } | null>(null);
   let wsName = $state('');
+
+  // Stash tab state
+  let stashRepo = $state('');
+  let stashMessage = $state('');
+  let stashIncludeUntracked = $state(false);
+  let stashEntries = $state<StashEntry[]>([]);
+  let isStashing = $state(false);
+  let stashResult = $state<string | null>(null);
 
   workspaceName.subscribe(v => wsName = v);
 
@@ -59,13 +76,32 @@
     repoChanges = changes;
   }
 
+  async function loadStashes() {
+    if (!stashRepo) return;
+    try {
+      stashEntries = await invoke<StashEntry[]>('git_stash_list', { repoPath: stashRepo });
+    } catch (e) {
+      console.error('Failed to load stashes:', e);
+      stashEntries = [];
+    }
+  }
+
   function open() {
     isOpen = true;
     commitMessage = '';
     commitResult = null;
+    stashResult = null;
     selectedFile = null;
     amendMode = false;
+    activeTab = 'commit';
     loadChanges();
+
+    // Set default stash repo
+    const repos = $gitRepos;
+    if (repos.length > 0 && !stashRepo) {
+      stashRepo = repos[0];
+    }
+
     requestAnimationFrame(() => textareaEl?.focus());
   }
 
@@ -73,6 +109,18 @@
     isOpen = false;
     commitMessage = '';
     commitResult = null;
+    stashResult = null;
+  }
+
+  function switchTab(tab: ActiveTab) {
+    activeTab = tab;
+    if (tab === 'stash') {
+      const repos = $gitRepos;
+      if (repos.length > 0 && !stashRepo) {
+        stashRepo = repos[0];
+      }
+      loadStashes();
+    }
   }
 
   function toggleFile(repoIdx: number, fileIdx: number) {
@@ -201,11 +249,65 @@
     }
   }
 
+  async function doStash() {
+    if (!stashRepo) return;
+    isStashing = true;
+    stashResult = null;
+    try {
+      await invoke<string>('git_stash_save', {
+        repoPath: stashRepo,
+        message: stashMessage.trim() || 'WIP',
+        includeUntracked: stashIncludeUntracked,
+      });
+      stashMessage = '';
+      stashResult = 'Stash saved';
+      showToast('Stash saved', 'success');
+      await loadStashes();
+    } catch (e: any) {
+      stashResult = `Error: ${e}`;
+      showToast(`Stash failed: ${e}`, 'error');
+    }
+    isStashing = false;
+  }
+
+  async function applyStash(index: number) {
+    if (!stashRepo) return;
+    try {
+      await invoke<string>('git_stash_apply', { repoPath: stashRepo, index });
+      showToast('Stash applied', 'success');
+      await loadStashes();
+    } catch (e: any) {
+      showToast(`Apply failed: ${e}`, 'error');
+    }
+  }
+
+  async function popStash(index: number) {
+    if (!stashRepo) return;
+    try {
+      await invoke<string>('git_stash_pop', { repoPath: stashRepo, index });
+      showToast('Stash popped', 'success');
+      await loadStashes();
+    } catch (e: any) {
+      showToast(`Pop failed: ${e}`, 'error');
+    }
+  }
+
+  async function dropStash(index: number) {
+    if (!stashRepo) return;
+    try {
+      await invoke<string>('git_stash_drop', { repoPath: stashRepo, index });
+      showToast('Stash dropped', 'info');
+      await loadStashes();
+    } catch (e: any) {
+      showToast(`Drop failed: ${e}`, 'error');
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') { close(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      doCommit(e.shiftKey);
+      if (activeTab === 'commit') doCommit(e.shiftKey);
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
@@ -234,10 +336,20 @@
       <!-- Title bar with tabs -->
       <div class="title-bar">
         <div class="title-tabs">
-          <button class="tab tab-active">Commit</button>
-          <button class="tab tab-inactive" disabled>Stash</button>
+          <button
+            class="tab"
+            class:tab-active={activeTab === 'commit'}
+            class:tab-inactive={activeTab !== 'commit'}
+            onclick={() => switchTab('commit')}
+          >Commit</button>
+          <button
+            class="tab"
+            class:tab-active={activeTab === 'stash'}
+            class:tab-inactive={activeTab !== 'stash'}
+            onclick={() => switchTab('stash')}
+          >Stash</button>
         </div>
-        <span class="title-label">Commit — {wsName}</span>
+        <span class="title-label">{activeTab === 'commit' ? 'Commit' : 'Stash'} — {wsName}</span>
         <!-- svelte-ignore a11y_consider_explicit_label -->
         <button class="close-btn" onclick={close}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -246,163 +358,255 @@
         </button>
       </div>
 
-      <!-- Toolbar row -->
-      <div class="toolbar">
-        <!-- Refresh -->
-        <button class="tool-btn" onclick={loadChanges} title="Refresh">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-          </svg>
-        </button>
-        <!-- Diff -->
-        <button class="tool-btn" onclick={showDiffForSelected} title="Show Diff (Cmd+D)">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-          </svg>
-        </button>
-        <div class="toolbar-sep"></div>
-        <!-- Expand all -->
-        <button class="tool-btn" title="Expand All" onclick={() => repoChanges.forEach((_, i) => repoChanges[i].expanded = true)}>
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
-          </svg>
-        </button>
-        <!-- Collapse all -->
-        <button class="tool-btn" title="Collapse All" onclick={() => repoChanges.forEach((_, i) => repoChanges[i].expanded = false)}>
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/>
-          </svg>
-        </button>
-      </div>
+      {#if activeTab === 'commit'}
 
-      <!-- Changes tree — takes up top half -->
-      <div class="changes-tree">
-        <!-- Master header row -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="changes-header" onclick={toggleAll}>
-          <span class="chevron chevron-root">
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z"/>
+        <!-- Toolbar row -->
+        <div class="toolbar">
+          <!-- Refresh -->
+          <button class="tool-btn" onclick={loadChanges} title="Refresh">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+              <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
             </svg>
-          </span>
-          <input
-            type="checkbox"
-            class="cb"
-            checked={allFilesSelected()}
-            indeterminate={someFilesSelected()}
-            onclick={(e) => { e.stopPropagation(); toggleAll(); }}
-          />
-          <span class="changes-label">Changes</span>
-          <span class="changes-count">{totalFileCount()} file{totalFileCount() !== 1 ? 's' : ''}</span>
+          </button>
+          <!-- Diff -->
+          <button class="tool-btn" onclick={showDiffForSelected} title="Show Diff (Cmd+D)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+            </svg>
+          </button>
+          <div class="toolbar-sep"></div>
+          <!-- Expand all -->
+          <button class="tool-btn" title="Expand All" onclick={() => repoChanges.forEach((_, i) => repoChanges[i].expanded = true)}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+            </svg>
+          </button>
+          <!-- Collapse all -->
+          <button class="tool-btn" title="Collapse All" onclick={() => repoChanges.forEach((_, i) => repoChanges[i].expanded = false)}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/>
+            </svg>
+          </button>
         </div>
 
-        {#each repoChanges as repo, ri}
-          <div class="repo-group">
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="repo-row">
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <span
-                class="chevron"
-                class:expanded={repo.expanded}
-                onclick={() => toggleRepoExpand(ri)}
-              >
-                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
-                </svg>
-              </span>
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <input
-                type="checkbox"
-                class="cb"
-                checked={repo.files.every(f => f.selected)}
-                indeterminate={repo.files.some(f => f.selected) && !repo.files.every(f => f.selected)}
-                onclick={(e) => { e.stopPropagation(); toggleRepo(ri); }}
-              />
-              <span class="repo-icon" style="background: var(--color-accent)"></span>
-              <span class="repo-name">{repo.repoName}</span>
-              <span class="repo-file-count">&nbsp;{repo.files.filter(f => f.selected).length} file{repo.files.filter(f => f.selected).length !== 1 ? 's' : ''}</span>
-              <span class="repo-branch">{repo.branch}</span>
-            </div>
+        <!-- Changes tree — takes up top half -->
+        <div class="changes-tree">
+          <!-- Master header row -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="changes-header" onclick={toggleAll}>
+            <span class="chevron chevron-root">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z"/>
+              </svg>
+            </span>
+            <input
+              type="checkbox"
+              class="cb"
+              checked={allFilesSelected()}
+              indeterminate={someFilesSelected()}
+              onclick={(e) => { e.stopPropagation(); toggleAll(); }}
+            />
+            <span class="changes-label">Changes</span>
+            <span class="changes-count">{totalFileCount()} file{totalFileCount() !== 1 ? 's' : ''}</span>
+          </div>
 
-            {#if repo.expanded}
-              {#each repo.files as file, fi}
+          {#each repoChanges as repo, ri}
+            <div class="repo-group">
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="repo-row">
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="file-row"
-                  class:file-row-selected={selectedFile?.file.relative_path === file.relative_path && selectedFile?.repoPath === repo.repoPath}
-                  onclick={() => selectFile(repo.repoPath, file)}
-                  ondblclick={() => { selectFile(repo.repoPath, file); showDiffForSelected(); }}
+                <span
+                  class="chevron"
+                  class:expanded={repo.expanded}
+                  onclick={() => toggleRepoExpand(ri)}
                 >
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
+                  </svg>
+                </span>
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <input
+                  type="checkbox"
+                  class="cb"
+                  checked={repo.files.every(f => f.selected)}
+                  indeterminate={repo.files.some(f => f.selected) && !repo.files.every(f => f.selected)}
+                  onclick={(e) => { e.stopPropagation(); toggleRepo(ri); }}
+                />
+                <span class="repo-icon" style="background: var(--color-accent)"></span>
+                <span class="repo-name">{repo.repoName}</span>
+                <span class="repo-file-count">&nbsp;{repo.files.filter(f => f.selected).length} file{repo.files.filter(f => f.selected).length !== 1 ? 's' : ''}</span>
+                <span class="repo-branch">{repo.branch}</span>
+              </div>
+
+              {#if repo.expanded}
+                {#each repo.files as file, fi}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <input
-                    type="checkbox"
-                    class="cb"
-                    checked={file.selected}
-                    onclick={(e) => { e.stopPropagation(); toggleFile(ri, fi); }}
-                  />
-                  <span class="file-status-letter" style="color: {statusColor(file.status)}">{statusLetter(file.status)}</span>
-                  <span class="file-name">{file.relative_path.split('/').pop()}</span>
-                  <span class="file-path-hint">{file.relative_path.includes('/') ? file.relative_path.substring(0, file.relative_path.lastIndexOf('/')) : ''}</span>
+                  <div
+                    class="file-row"
+                    class:file-row-selected={selectedFile?.file.relative_path === file.relative_path && selectedFile?.repoPath === repo.repoPath}
+                    onclick={() => selectFile(repo.repoPath, file)}
+                    ondblclick={() => { selectFile(repo.repoPath, file); showDiffForSelected(); }}
+                  >
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <input
+                      type="checkbox"
+                      class="cb"
+                      checked={file.selected}
+                      onclick={(e) => { e.stopPropagation(); toggleFile(ri, fi); }}
+                    />
+                    <span class="file-status-letter" style="color: {statusColor(file.status)}">{statusLetter(file.status)}</span>
+                    <span class="file-name">{file.relative_path.split('/').pop()}</span>
+                    <span class="file-path-hint">{file.relative_path.includes('/') ? file.relative_path.substring(0, file.relative_path.lastIndexOf('/')) : ''}</span>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          {/each}
+
+          {#if repoChanges.length === 0}
+            <div class="no-changes">No changes to commit</div>
+          {/if}
+        </div>
+
+        <!-- Amend divider row -->
+        <div class="amend-row">
+          <label class="amend-label">
+            <input type="checkbox" class="cb" bind:checked={amendMode} />
+            <span>Amend</span>
+          </label>
+          <span class="modified-count">{selectedFileCount()} modified</span>
+        </div>
+
+        <!-- Commit message textarea — BOTTOM -->
+        <div class="commit-message-area">
+          <textarea
+            bind:this={textareaEl}
+            bind:value={commitMessage}
+            class="commit-input"
+            placeholder="Commit message..."
+          ></textarea>
+        </div>
+
+        {#if commitResult}
+          <div class="commit-result" class:result-error={commitResult.includes('Error')}>
+            {commitResult}
+          </div>
+        {/if}
+
+        <!-- Footer -->
+        <div class="dialog-footer">
+          <div class="footer-left">
+            <span class="footer-hint"><kbd>⌘Enter</kbd> commit &nbsp; <kbd>⌘⇧Enter</kbd> commit & push &nbsp; <kbd>⌘D</kbd> diff</span>
+          </div>
+          <div class="footer-actions">
+            <button class="btn-secondary" onclick={close}>Cancel</button>
+            <button
+              class="btn-secondary"
+              onclick={() => doCommit(true)}
+              disabled={!commitMessage.trim() || selectedFileCount() === 0 || isCommitting}
+            >
+              Commit and Push...
+            </button>
+            <button
+              class="btn-primary"
+              onclick={() => doCommit(false)}
+              disabled={!commitMessage.trim() || selectedFileCount() === 0 || isCommitting}
+            >
+              {isCommitting ? 'Committing...' : 'Commit'}
+            </button>
+          </div>
+        </div>
+
+      {:else}
+        <!-- ── STASH TAB ── -->
+        <div class="stash-tab-content">
+
+          <!-- Repo selector (if multiple repos) -->
+          {#if $gitRepos.length > 1}
+            <div class="stash-section">
+              <label class="stash-label">Repository</label>
+              <select class="stash-select" bind:value={stashRepo} onchange={loadStashes}>
+                {#each $gitRepos as repo}
+                  <option value={repo}>{repo.split('/').pop()}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+
+          <!-- Stash message input -->
+          <div class="stash-section">
+            <label class="stash-label">Stash message (optional)</label>
+            <input
+              type="text"
+              class="stash-input"
+              bind:value={stashMessage}
+              placeholder="WIP on feature..."
+            />
+          </div>
+
+          <!-- Include untracked -->
+          <div class="stash-section">
+            <label class="stash-checkbox-label">
+              <input type="checkbox" class="cb" bind:checked={stashIncludeUntracked} />
+              <span>Include untracked files</span>
+            </label>
+          </div>
+
+          {#if stashResult}
+            <div class="stash-result" class:result-error={stashResult.startsWith('Error')}>
+              {stashResult}
+            </div>
+          {/if}
+
+          <!-- Existing stashes -->
+          <div class="stash-list-header">
+            <span>Saved Stashes ({stashEntries.length})</span>
+            <button class="tool-btn" onclick={loadStashes} title="Refresh">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="stash-list">
+            {#each stashEntries as entry}
+              <div class="stash-entry">
+                <div class="stash-entry-info">
+                  <span class="stash-entry-index">stash@{'{' + entry.index + '}'}</span>
+                  <span class="stash-entry-msg">{entry.message}</span>
+                  <span class="stash-entry-date">{entry.date}</span>
                 </div>
-              {/each}
+                <div class="stash-entry-actions">
+                  <button class="stash-action-btn" onclick={() => applyStash(entry.index)} title="Apply (keep stash)">Apply</button>
+                  <button class="stash-action-btn" onclick={() => popStash(entry.index)} title="Pop (apply and remove)">Pop</button>
+                  <button class="stash-action-btn stash-action-drop" onclick={() => dropStash(entry.index)} title="Drop stash">Drop</button>
+                </div>
+              </div>
+            {/each}
+            {#if stashEntries.length === 0}
+              <div class="no-stashes">No stashes</div>
             {/if}
           </div>
-        {/each}
+        </div>
 
-        {#if repoChanges.length === 0}
-          <div class="no-changes">No changes to commit</div>
-        {/if}
-      </div>
-
-      <!-- Amend divider row -->
-      <div class="amend-row">
-        <label class="amend-label">
-          <input type="checkbox" class="cb" bind:checked={amendMode} />
-          <span>Amend</span>
-        </label>
-        <span class="modified-count">{selectedFileCount()} modified</span>
-      </div>
-
-      <!-- Commit message textarea — BOTTOM -->
-      <div class="commit-message-area">
-        <textarea
-          bind:this={textareaEl}
-          bind:value={commitMessage}
-          class="commit-input"
-          placeholder="Commit message..."
-        ></textarea>
-      </div>
-
-      {#if commitResult}
-        <div class="commit-result" class:result-error={commitResult.includes('Error')}>
-          {commitResult}
+        <!-- Stash footer -->
+        <div class="dialog-footer">
+          <div class="footer-left"></div>
+          <div class="footer-actions">
+            <button class="btn-secondary" onclick={close}>Cancel</button>
+            <button
+              class="btn-primary"
+              onclick={doStash}
+              disabled={isStashing || !stashRepo}
+            >
+              {isStashing ? 'Stashing...' : 'Stash Changes'}
+            </button>
+          </div>
         </div>
       {/if}
 
-      <!-- Footer -->
-      <div class="dialog-footer">
-        <div class="footer-left">
-          <span class="footer-hint"><kbd>⌘Enter</kbd> commit &nbsp; <kbd>⌘⇧Enter</kbd> commit & push &nbsp; <kbd>⌘D</kbd> diff</span>
-        </div>
-        <div class="footer-actions">
-          <button class="btn-secondary" onclick={close}>Cancel</button>
-          <button
-            class="btn-secondary"
-            onclick={() => doCommit(true)}
-            disabled={!commitMessage.trim() || selectedFileCount() === 0 || isCommitting}
-          >
-            Commit and Push...
-          </button>
-          <button
-            class="btn-primary"
-            onclick={() => doCommit(false)}
-            disabled={!commitMessage.trim() || selectedFileCount() === 0 || isCommitting}
-          >
-            {isCommitting ? 'Committing...' : 'Commit'}
-          </button>
-        </div>
-      </div>
     </div>
   </div>
 {/if}
@@ -475,8 +679,11 @@
   .tab-inactive {
     color: var(--color-text-muted);
     background: transparent;
-    cursor: default;
-    opacity: 0.55;
+  }
+
+  .tab-inactive:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
   }
 
   .title-label {
@@ -777,6 +984,183 @@
 
   .commit-result.result-error {
     color: var(--color-error);
+  }
+
+  /* ── Stash tab ── */
+  .stash-tab-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    background: var(--color-bg-base);
+  }
+
+  .stash-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .stash-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .stash-input,
+  .stash-select {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 6px 10px;
+    outline: none;
+    transition: border-color 0.12s;
+  }
+
+  .stash-input:focus,
+  .stash-select:focus {
+    border-color: var(--color-accent);
+  }
+
+  .stash-input::placeholder {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .stash-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .stash-checkbox-label:hover {
+    color: var(--color-text-primary);
+  }
+
+  .stash-result {
+    font-size: 12px;
+    color: var(--color-success);
+    padding: 4px 0;
+  }
+
+  .stash-result.result-error {
+    color: var(--color-error);
+  }
+
+  .stash-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding-top: 4px;
+    border-top: 1px solid var(--color-border-subtle);
+    margin-top: 2px;
+  }
+
+  .stash-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .stash-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 5px;
+    transition: background 0.1s;
+  }
+
+  .stash-entry:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .stash-entry-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .stash-entry-index {
+    font-family: var(--font-editor, monospace);
+    font-size: 10px;
+    color: var(--color-accent);
+  }
+
+  .stash-entry-msg {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .stash-entry-date {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .stash-entry-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .stash-action-btn {
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 500;
+    background: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+  }
+
+  .stash-action-btn:hover {
+    background: var(--color-bg-active);
+    color: var(--color-text-primary);
+  }
+
+  .stash-action-drop:hover {
+    background: rgba(248, 113, 113, 0.15);
+    border-color: var(--color-error);
+    color: var(--color-error);
+  }
+
+  .no-stashes {
+    padding: 20px;
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: 12px;
   }
 
   /* ── Footer ── */
