@@ -246,12 +246,15 @@
     openDiffDialog(repo.repoPath, f.relative_path, fileName, false);
   }
 
+  let dialogEl: HTMLDivElement | undefined;
+
   function open() {
     isOpen = true;
     pushResult = null;
     commitFiles = [];
     selectedFileIndex = -1;
     loadRepos();
+    requestAnimationFrame(() => dialogEl?.focus());
   }
 
   function close() {
@@ -339,7 +342,7 @@
 
 {#if isOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog-container" style="{dialogX !== null ? `left: ${dialogX}px; top: ${dialogY}px; transform: none;` : ''}" onkeydown={handleKeydown} tabindex="-1">
+  <div class="dialog-container" bind:this={dialogEl} style="{dialogX !== null ? `left: ${dialogX}px; top: ${dialogY}px; transform: none;` : ''}" onkeydown={handleKeydown} tabindex="-1">
     <div class="dialog" style="width: {dialogW}px; height: {dialogH}px;">
 
       <!-- Title bar (drag handle) -->

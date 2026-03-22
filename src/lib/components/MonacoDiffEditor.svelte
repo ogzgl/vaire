@@ -83,14 +83,16 @@
     }
   }
 
-  function rejectAllChanges() {
+  async function rejectAllChanges() {
     if (!diffEditor || !modifiedModel || !originalModel) return;
     try {
-      // Restore modified model to original content
       const origContent = originalModel.getValue();
       modifiedModel.setValue(origContent);
+      // Write reverted content to disk
+      const fullPath = repoPath + '/' + filePath;
+      await invoke('write_file_content', { path: fullPath, content: origContent });
       diffCount = 0;
-      showToast('All changes rejected', 'info');
+      showToast('All changes reverted', 'info');
     } catch (e) {
       showToast('Failed to reject changes', 'error');
     }
@@ -109,6 +111,8 @@
       fontLigatures: true,
       readOnly: false,
       renderSideBySide: true,
+      useInlineViewWhenSpaceIsLimited: false,
+      enableSplitViewResizing: true,
       automaticLayout: true,
       scrollBeyondLastLine: false,
       minimap: { enabled: false },
@@ -118,6 +122,7 @@
         horizontalScrollbarSize: 8,
         useShadows: false,
       },
+      originalEditable: false,
     });
 
     // Load original (HEAD) and modified content
@@ -156,6 +161,23 @@
       setTimeout(() => {
         diffCount = countDiffs();
       }, 300);
+
+      // Auto-save modified model changes to disk (handles inline "Revert this change", manual edits, etc.)
+      let saveTimeout: ReturnType<typeof setTimeout>;
+      modifiedModel.onDidChangeContent(() => {
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(async () => {
+          if (!modifiedModel) return;
+          try {
+            const fullPath = repoPath + '/' + filePath;
+            await invoke('write_file_content', { path: fullPath, content: modifiedModel.getValue() });
+          } catch (e) {
+            console.error('Auto-save diff failed:', e);
+          }
+          // Recount diffs
+          diffCount = countDiffs();
+        }, 500);
+      });
     } catch (e) {
       console.error('Failed to load diff:', e);
     }
@@ -189,6 +211,12 @@
 <div class="diff-editor-container">
   <!-- Diff toolbar -->
   <div class="diff-toolbar">
+    <div class="diff-pane-labels">
+      <span class="diff-pane-label original-label">HEAD (committed)</span>
+      <span class="diff-pane-label modified-label">Working Copy</span>
+    </div>
+  </div>
+  <div class="diff-toolbar diff-toolbar-actions">
     <div class="diff-info">
       <span class="diff-file-path">{filePath}</span>
       {#if diffCount > 0}
@@ -244,7 +272,31 @@
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
     gap: 8px;
-    height: 30px;
+    height: 26px;
+  }
+
+  .diff-toolbar-actions {
+    height: 26px;
+  }
+
+  .diff-pane-labels {
+    display: flex;
+    width: 100%;
+  }
+
+  .diff-pane-label {
+    flex: 1;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .original-label {
+    color: var(--color-error);
+  }
+
+  .modified-label {
+    color: var(--color-success);
   }
 
   .diff-info {

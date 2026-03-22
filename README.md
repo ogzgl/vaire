@@ -93,5 +93,4 @@ MIT — do whatever you want with it. See [LICENSE](LICENSE).
 ---
 
 *Built by [Oguz Gul](https://github.com/ogzgl) because existing editors made him mad.*
-
 *100% vibe coded with [Claude Code](https://claude.ai/claude-code). Every line of Rust, Svelte, and TypeScript in this repo was generated through conversation. No hand-typing was harmed in the making of this editor.*

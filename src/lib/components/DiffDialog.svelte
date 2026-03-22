@@ -11,8 +11,8 @@
   let positioned = $state(false);
 
   function resetPosition() {
-    dialogW = Math.min(900, window.innerWidth - 48);
-    dialogH = Math.min(580, window.innerHeight - 80);
+    dialogW = Math.min(1200, window.innerWidth - 48);
+    dialogH = Math.min(700, window.innerHeight - 80);
     dialogX = (window.innerWidth - dialogW) / 2;
     dialogY = (window.innerHeight - dialogH) / 2;
     positioned = true;
