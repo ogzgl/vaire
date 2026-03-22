@@ -667,13 +667,21 @@ fn terminal_write(id: u32, data: String, state: State<TerminalState>) -> Result<
 
 #[tauri::command]
 fn terminal_kill(id: u32, state: State<TerminalState>) -> Result<(), String> {
-    // Kill the process group (negative PID = kill entire process group)
+    // Kill the process group
     {
         let mut pids = state.child_pids.lock().unwrap();
         if let Some(pid) = pids.remove(&id) {
-            // Kill the entire process group rooted at the shell
+            #[cfg(unix)]
             unsafe {
+                // Negative PID = kill entire process group
                 libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                // On Windows, use taskkill to kill the process tree
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output();
             }
         }
     }
@@ -1410,15 +1418,18 @@ fn open_new_window(app: tauri::AppHandle, workspace_path: String) -> Result<(), 
     );
     let project_name = workspace_path.split('/').last().unwrap_or(&workspace_path);
     let encoded = workspace_path.replace(' ', "%20").replace('#', "%23");
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(format!("/?workspace={}", encoded).into()))
+    let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(format!("/?workspace={}", encoded).into()))
         .title(&format!("Vaire \u{2014} {}", project_name))
         .inner_size(1280.0, 820.0)
         .min_inner_size(900.0, 600.0)
-        .decorations(true)
+        .decorations(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .hidden_title(true);
+
+    builder.build().map_err(|e: tauri::Error| e.to_string())?;
     Ok(())
 }
 

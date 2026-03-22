@@ -23,5 +23,7 @@ ignore = "0.4"
 portable-pty = "0.8"
 regex = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
