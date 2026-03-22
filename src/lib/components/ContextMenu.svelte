@@ -205,6 +205,7 @@
         <button class="inline-input-ok" onclick={handleNewFolder}>Create</button>
       </div>
     {:else}
+      <!-- New submenu -->
       <button class="menu-item" onclick={startNewFile}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
@@ -218,24 +219,41 @@
         New Folder
       </button>
       <div class="menu-separator"></div>
+
+      <!-- Edit operations -->
       <button class="menu-item" onclick={startRename}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
         </svg>
-        Rename
+        <span class="menu-label">Rename</span>
+        <span class="menu-shortcut">F2</span>
       </button>
       <button class="menu-item danger" onclick={() => showDeleteConfirm = true}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
         </svg>
-        Delete
+        <span class="menu-label">Delete</span>
+        <span class="menu-shortcut">Del</span>
       </button>
       <div class="menu-separator"></div>
+
+      <!-- Find in Files -->
+      <button class="menu-item" onclick={() => { onclose(); window.dispatchEvent(new CustomEvent('vaire:find-in-path', { detail: { path: node.path } })); }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <span class="menu-label">Find in Files</span>
+        <span class="menu-shortcut">Cmd+Shift+F</span>
+      </button>
+      <div class="menu-separator"></div>
+
+      <!-- Copy operations -->
       <button class="menu-item" onclick={handleCopyPath}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        Copy Path
+        <span class="menu-label">Copy Path</span>
+        <span class="menu-shortcut">Cmd+Shift+C</span>
       </button>
       <button class="menu-item" onclick={handleCopyRelativePath}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -244,11 +262,14 @@
         Copy Relative Path
       </button>
       <div class="menu-separator"></div>
+
+      <!-- Reveal -->
       <button class="menu-item" onclick={handleRevealInFinder}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 6a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Z"/>
         </svg>
-        Reveal in Finder
+        <span class="menu-label">Reveal in Finder</span>
+        <span class="menu-shortcut">Cmd+Shift+R</span>
       </button>
     {/if}
   </div>
@@ -293,6 +314,17 @@
     border-radius: 5px;
     cursor: pointer;
     transition: background 0.1s ease, color 0.1s ease;
+  }
+
+  .menu-label {
+    flex: 1;
+  }
+
+  .menu-shortcut {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    margin-left: auto;
+    flex-shrink: 0;
   }
 
   .menu-item:hover {

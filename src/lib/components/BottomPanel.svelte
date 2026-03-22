@@ -10,6 +10,8 @@
   let terminalMounted = $state(false);
   let runMounted = $state(false);
   let debugMounted = $state(false);
+  let gitLogMounted = $state(false);
+  let todoMounted = $state(false);
   let isResizing = $state(false);
 
   // Expose run panel ref so TitleBar can call startRun/stopRun
@@ -25,16 +27,22 @@
     if ($activeBottomPanel === 'debug' && !debugMounted) {
       debugMounted = true;
     }
+    if ($activeBottomPanel === 'git-log' && !gitLogMounted) {
+      gitLogMounted = true;
+    }
+    if ($activeBottomPanel === 'todo' && !todoMounted) {
+      todoMounted = true;
+    }
   });
 
   // Listen for run trigger events from TitleBar
   function handleRunStart(e: Event) {
-    const { command, cwd, env } = (e as CustomEvent<{ command: string; cwd: string; env?: Record<string, string> }>).detail;
+    const { command, cwd, env, name } = (e as CustomEvent<{ command: string; cwd: string; env?: Record<string, string>; name?: string }>).detail;
     activeBottomPanel.set('run');
     runMounted = true;
     // Give the panel a tick to mount before calling startRun
     setTimeout(() => {
-      runPanelRef?.startRun(command, cwd, env);
+      runPanelRef?.startRun(command, cwd, env, name);
     }, 100);
   }
 
@@ -73,54 +81,55 @@
   }
 </script>
 
-{#if $activeBottomPanel}
-  <div class="bottom-panel" style="height: {$bottomPanelHeight}px">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="resize-handle-h" onmousedown={startResize}></div>
-    <div class="bottom-panel-header">
-      <div class="bottom-panel-tabs">
-        <button
-          class="bottom-tab"
-          class:active={$activeBottomPanel === 'terminal'}
-          onclick={() => activeBottomPanel.set('terminal')}
-        >
-          Terminal
-        </button>
-        <button
-          class="bottom-tab"
-          class:active={$activeBottomPanel === 'run'}
-          onclick={() => activeBottomPanel.set('run')}
-        >
-          Run
-        </button>
-        <button
-          class="bottom-tab"
-          class:active={$activeBottomPanel === 'git-log'}
-          onclick={() => activeBottomPanel.set('git-log')}
-        >
-          Git Log
-        </button>
-        <button
-          class="bottom-tab"
-          class:active={$activeBottomPanel === 'todo'}
-          onclick={() => activeBottomPanel.set('todo')}
-        >
-          TODO
-        </button>
-        <button
-          class="bottom-tab"
-          class:active={$activeBottomPanel === 'debug'}
-          onclick={() => activeBottomPanel.set('debug')}
-        >
-          Debug
+  <div class="bottom-panel" class:bottom-panel-hidden={!$activeBottomPanel} style="height: {$activeBottomPanel ? $bottomPanelHeight : 0}px">
+    {#if $activeBottomPanel}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="resize-handle-h" onmousedown={startResize}></div>
+      <div class="bottom-panel-header">
+        <div class="bottom-panel-tabs">
+          <button
+            class="bottom-tab"
+            class:active={$activeBottomPanel === 'terminal'}
+            onclick={() => activeBottomPanel.set('terminal')}
+          >
+            Terminal
+          </button>
+          <button
+            class="bottom-tab"
+            class:active={$activeBottomPanel === 'run'}
+            onclick={() => activeBottomPanel.set('run')}
+          >
+            Run
+          </button>
+          <button
+            class="bottom-tab"
+            class:active={$activeBottomPanel === 'git-log'}
+            onclick={() => activeBottomPanel.set('git-log')}
+          >
+            Git Log
+          </button>
+          <button
+            class="bottom-tab"
+            class:active={$activeBottomPanel === 'todo'}
+            onclick={() => activeBottomPanel.set('todo')}
+          >
+            TODO
+          </button>
+          <button
+            class="bottom-tab"
+            class:active={$activeBottomPanel === 'debug'}
+            onclick={() => activeBottomPanel.set('debug')}
+          >
+            Debug
+          </button>
+        </div>
+        <button class="bottom-close" onclick={() => activeBottomPanel.set(null)} aria-label="Close panel">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+          </svg>
         </button>
       </div>
-      <button class="bottom-close" onclick={() => activeBottomPanel.set(null)} aria-label="Close panel">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-        </svg>
-      </button>
-    </div>
+    {/if}
 
     <div class="bottom-panel-content">
       <!-- Terminal: keep mounted once opened -->
@@ -128,8 +137,6 @@
         <div class="panel-slot" class:visible={$activeBottomPanel === 'terminal'}>
           <Terminal />
         </div>
-      {:else if $activeBottomPanel === 'terminal'}
-        <Terminal />
       {/if}
 
       <!-- Run: keep mounted once opened -->
@@ -139,10 +146,18 @@
         </div>
       {/if}
 
-      {#if $activeBottomPanel === 'git-log'}
-        <GitLog />
-      {:else if $activeBottomPanel === 'todo'}
-        <TodoPanel />
+      <!-- Git Log: keep mounted once opened -->
+      {#if gitLogMounted}
+        <div class="panel-slot" class:visible={$activeBottomPanel === 'git-log'}>
+          <GitLog />
+        </div>
+      {/if}
+
+      <!-- TODO: keep mounted once opened -->
+      {#if todoMounted}
+        <div class="panel-slot" class:visible={$activeBottomPanel === 'todo'}>
+          <TodoPanel />
+        </div>
       {/if}
 
       <!-- Debug: keep mounted once opened -->
@@ -153,7 +168,6 @@
       {/if}
     </div>
   </div>
-{/if}
 
 <style>
   .bottom-panel {
@@ -163,6 +177,12 @@
     flex-direction: column;
     flex-shrink: 0;
     position: relative;
+  }
+
+  .bottom-panel-hidden {
+    height: 0 !important;
+    border-top: none;
+    overflow: hidden;
   }
 
   .resize-handle-h {
@@ -252,5 +272,7 @@
   .panel-slot.visible {
     visibility: visible;
     pointer-events: auto;
+    background: var(--color-bg-surface);
+    z-index: 1;
   }
 </style>

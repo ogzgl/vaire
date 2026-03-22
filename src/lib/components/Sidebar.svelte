@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { activeSidebarPanel } from '$lib/stores/app';
   import { fileTree, openFile, openWorkspace, toggleNode, workspacePath, gitFileStatuses, activeFilePath, type FileNode } from '$lib/stores/workspace';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -175,7 +176,53 @@
   }
 
   function getIconSvg(item: FileNode): string {
-    return getFileIconSvg(item.lang, item.type);
+    const iconType = item.type === 'folder' && item.expanded ? 'folder-open' : item.type;
+    return getFileIconSvg(item.lang, iconType, item.name);
+  }
+
+  function collapseAll() {
+    fileTree.update(tree => {
+      function collapse(nodes: FileNode[]): FileNode[] {
+        return nodes.map(n => ({
+          ...n,
+          expanded: false,
+          children: n.children ? collapse(n.children) : undefined,
+        }));
+      }
+      return collapse(tree);
+    });
+  }
+
+  async function locateActiveFile() {
+    const activeFile = $activeFilePath;
+    if (!activeFile) return;
+    // Expand all parent folders for the active file
+    fileTree.update(tree => {
+      function expandPath(nodes: FileNode[], target: string): FileNode[] {
+        return nodes.map(n => {
+          if (target.startsWith(n.path + '/') || target === n.path) {
+            return {
+              ...n,
+              expanded: true,
+              children: n.children ? expandPath(n.children, target) : undefined,
+            };
+          }
+          return {
+            ...n,
+            children: n.children ? expandPath(n.children, target) : undefined,
+          };
+        });
+      }
+      return expandPath(tree, activeFile);
+    });
+    // Also switch sidebar to files panel
+    activeSidebarPanel.set('files');
+    // Wait for Svelte DOM update, then scroll
+    await tick();
+    requestAnimationFrame(() => {
+      document.querySelector('.tree-item.active-file')
+        ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
   }
 </script>
 
@@ -196,6 +243,29 @@
         TODO
       {/if}
     </span>
+    {#if $activeSidebarPanel === 'files' && $fileTree.length > 0}
+      <div class="sidebar-toolbar">
+        <button class="toolbar-btn" title="Locate Active File" onclick={locateActiveFile}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+          </svg>
+        </button>
+        <button class="toolbar-btn" title="Collapse All" onclick={collapseAll}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 14h16M4 10h16M9 18l3-3 3 3M9 6l3 3 3-3"/>
+          </svg>
+        </button>
+        <button class="toolbar-btn" title="Refresh" onclick={refreshTree}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 2v6h-6"/>
+            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+            <path d="M3 22v-6h6"/>
+            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+          </svg>
+        </button>
+      </div>
+    {/if}
   </div>
 
   <div class="sidebar-content">
@@ -343,8 +413,34 @@
     padding: 0 12px;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
+  }
+
+  .sidebar-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .toolbar-btn {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+
+  .toolbar-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
   }
 
   .sidebar-title {

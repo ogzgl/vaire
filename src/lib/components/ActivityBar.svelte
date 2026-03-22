@@ -1,6 +1,6 @@
 <script lang="ts">
   import { activeSidebarPanel, activeBottomPanel, type SidebarPanel, type BottomPanel } from '$lib/stores/app';
-  import { showSettings } from '$lib/stores/theme';
+  import { openSettingsTab } from '$lib/stores/workspace';
 
   function toggleSidebar(panel: SidebarPanel) {
     activeSidebarPanel.update(current => current === panel ? current : panel);
@@ -20,6 +20,9 @@
   ];
 
   const bottomItems: { id: BottomPanel; label: string; icon: string }[] = [
+    { id: 'git-log', label: 'Git Log', icon: 'git-log' },
+    { id: 'run', label: 'Run', icon: 'run' },
+    { id: 'debug', label: 'Debug', icon: 'debug' },
     { id: 'terminal', label: 'Terminal', icon: 'terminal' },
   ];
 </script>
@@ -35,40 +38,44 @@
         onclick={() => toggleSidebar(item.id)}
       >
         {#if item.icon === 'files'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/>
-            <path d="M3 7l7-4h4l7 4"/>
-            <path d="M12 22V11"/>
-            <path d="M3 7l9 4 9-4"/>
+          <!-- Filled folder/project icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 5a2 2 0 0 1 2-2h4.586a1 1 0 0 1 .707.293L12 5h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Z"/>
+            <path d="M3 8h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z" fill="currentColor" opacity="0.7"/>
           </svg>
         {:else if item.icon === 'search'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="7"/>
-            <path d="m21 21-4.35-4.35"/>
+          <!-- Heavier search icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10.5" cy="10.5" r="6.5"/>
+            <path d="m21 21-4.8-4.8"/>
           </svg>
         {:else if item.icon === 'git'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="18" cy="18" r="3"/>
-            <circle cx="6" cy="6" r="3"/>
-            <path d="M6 9v6a3 3 0 0 0 3 3h3"/>
-            <path d="M18 15V9a3 3 0 0 0-3-3h-3"/>
+          <!-- Standard git branch icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <line x1="6" y1="3" x2="6" y2="15"/>
+            <circle cx="18" cy="6" r="3"/>
+            <circle cx="6" cy="18" r="3"/>
+            <path d="M18 9a9 9 0 0 1-9 9"/>
           </svg>
         {:else if item.icon === 'structure'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2v8"/>
-            <path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>
-            <rect x="2" y="10" width="8" height="4" rx="1"/>
-            <rect x="14" y="10" width="8" height="4" rx="1"/>
+          <!-- Filled structure/tree icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="4" y="2" width="7" height="4" rx="1.5"/>
+            <rect x="1" y="10" width="7" height="4" rx="1.5"/>
+            <rect x="13" y="10" width="7" height="4" rx="1.5"/>
+            <rect x="4" y="18" width="7" height="4" rx="1.5"/>
+            <path d="M7.5 6v4M4.5 14v1a1 1 0 0 0 1 1h2V18M7.5 6v1.5a1 1 0 0 0 1 1h5a1 1 0 0 1 1 1V10" fill="none" stroke="currentColor" stroke-width="1.5"/>
           </svg>
         {:else if item.icon === 'bookmarks'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-            <path d="M6.5 2H20v20l-7-5-7 5V2z"/>
+          <!-- Filled bookmark icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-5.5L4 22V4a2 2 0 0 1 2-2Z"/>
           </svg>
         {:else if item.icon === 'todo'}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 11l3 3L22 4"/>
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          <!-- Filled checkbox icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="3" y="3" width="18" height="18" rx="3"/>
+            <path d="M9.5 12.5l2 2 4-4" stroke="var(--color-bg-surface)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
         {/if}
       </button>
@@ -84,18 +91,36 @@
         data-tooltip={item.label}
         onclick={() => toggleBottom(item.id as BottomPanel)}
       >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2"/>
-          <path d="m7 15 3-3-3-3"/>
-          <path d="M13 15h4"/>
-        </svg>
+        {#if item.icon === 'git-log'}
+          <!-- Clock/history icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/>
+          </svg>
+        {:else if item.icon === 'run'}
+          <!-- Play triangle -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+        {:else if item.icon === 'debug'}
+          <!-- Bug icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M20 8h-2.81a5.985 5.985 0 0 0-1.82-1.96L17 4.41 15.59 3l-2.17 2.17C12.96 5.06 12.49 5 12 5s-.96.06-1.41.17L8.41 3 7 4.41l1.62 1.63C7.88 6.55 7.26 7.22 6.81 8H4v2h2.09c-.05.33-.09.66-.09 1v1H4v2h2v1c0 .34.04.67.09 1H4v2h2.81c1.04 1.79 2.97 3 5.19 3s4.15-1.21 5.19-3H20v-2h-2.09c.05-.33.09-.66.09-1v-1h2v-2h-2v-1c0-.34-.04-.67-.09-1H20V8zm-6 8h-4v-2h4v2zm0-4h-4v-2h4v2z"/>
+          </svg>
+        {:else}
+          <!-- Filled terminal icon -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="2" y="3" width="20" height="18" rx="3"/>
+            <path d="M7 9l3 3-3 3" stroke="var(--color-bg-surface)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M13 15h4" stroke="var(--color-bg-surface)" stroke-width="2" stroke-linecap="round" fill="none"/>
+          </svg>
+        {/if}
       </button>
     {/each}
 
-    <button class="activity-btn" title="Settings" data-tooltip="Settings" onclick={() => showSettings.set(true)}>
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
-        <circle cx="12" cy="12" r="3"/>
+    <button class="activity-btn" title="Settings" data-tooltip="Settings" onclick={() => openSettingsTab()}>
+      <!-- Filled gear icon -->
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65A.49.49 0 0 0 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.49.49 0 0 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/>
       </svg>
     </button>
   </div>

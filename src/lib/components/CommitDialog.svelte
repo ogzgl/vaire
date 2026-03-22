@@ -39,6 +39,20 @@
   let selectedFile = $state<{ repoPath: string; file: GitChangedFile } | null>(null);
   let wsName = $state('');
 
+  // Section collapse state
+  let changesExpanded = $state(true);
+  let unversionedExpanded = $state(true);
+
+  // Context menu for file rows (tracked + untracked)
+  let fileContextMenu = $state<{ x: number; y: number; repoPath: string; file: GitChangedFile & { selected: boolean }; repoIdx: number; fileIdx: number; isUntracked: boolean } | null>(null);
+  let showRollbackConfirm = $state(false);
+
+  // Derived tracked/untracked grouping
+  let trackedCount = $derived(repoChanges.reduce((sum, r) => sum + r.files.filter(f => f.status !== 'untracked').length, 0));
+  let untrackedCount = $derived(repoChanges.reduce((sum, r) => sum + r.files.filter(f => f.status === 'untracked').length, 0));
+  let trackedSelectedCount = $derived(repoChanges.reduce((sum, r) => sum + r.files.filter(f => f.status !== 'untracked' && f.selected).length, 0));
+  let untrackedSelectedCount = $derived(repoChanges.reduce((sum, r) => sum + r.files.filter(f => f.status === 'untracked' && f.selected).length, 0));
+
   // Stash tab state
   let stashRepo = $state('');
   let stashMessage = $state('');
@@ -46,6 +60,53 @@
   let stashEntries = $state<StashEntry[]>([]);
   let isStashing = $state(false);
   let stashResult = $state<string | null>(null);
+
+  // Drag-to-move state
+  let dialogX = $state<number | null>(null);
+  let dialogY = $state<number | null>(null);
+  let dialogW = $state(650);
+  let dialogH = $state(500);
+
+  function startDrag(e: MouseEvent) {
+    if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) return;
+    e.preventDefault();
+    const startMX = e.clientX;
+    const startMY = e.clientY;
+    // If first drag, compute current position from center
+    const startX = dialogX ?? (window.innerWidth / 2 - dialogW / 2);
+    const startY = dialogY ?? (window.innerHeight / 2 - dialogH / 2);
+
+    function onMove(ev: MouseEvent) {
+      dialogX = startX + (ev.clientX - startMX);
+      dialogY = startY + (ev.clientY - startMY);
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function startResize(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startMX = e.clientX;
+    const startMY = e.clientY;
+    const startW = dialogW;
+    const startH = dialogH;
+
+    function onMove(ev: MouseEvent) {
+      dialogW = Math.max(500, startW + (ev.clientX - startMX));
+      dialogH = Math.max(350, startH + (ev.clientY - startMY));
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
 
   workspaceName.subscribe(v => wsName = v);
 
@@ -64,7 +125,7 @@
             expanded: true,
             files: status.changed_files.map((f: GitChangedFile) => ({
               ...f,
-              selected: true,
+              selected: f.status !== 'untracked',
             })),
           });
         }
@@ -180,6 +241,168 @@
     repoChanges.forEach(r => r.files.forEach(f => f.selected = !allSelected));
   }
 
+  function toggleAllTracked() {
+    const allSelected = trackedCount > 0 && trackedSelectedCount === trackedCount;
+    repoChanges.forEach(r => r.files.filter(f => f.status !== 'untracked').forEach(f => f.selected = !allSelected));
+  }
+
+  function toggleAllUntracked() {
+    const allSelected = untrackedCount > 0 && untrackedSelectedCount === untrackedCount;
+    repoChanges.forEach(r => r.files.filter(f => f.status === 'untracked').forEach(f => f.selected = !allSelected));
+  }
+
+  async function addFilesToVCS(filesToAdd: { repoPath: string; relativePath: string }[]) {
+    let addedCount = 0;
+    for (const f of filesToAdd) {
+      try {
+        await invoke<string>('git_command', {
+          repoPath: f.repoPath,
+          args: ['add', '--', f.relativePath],
+        });
+        addedCount++;
+      } catch (e) {
+        console.error('Failed to add file:', f.relativePath, e);
+      }
+    }
+    if (addedCount > 0) {
+      showToast(`Added ${addedCount} file${addedCount !== 1 ? 's' : ''} to VCS`, 'success');
+      await loadChanges();
+    }
+  }
+
+  async function addSelectedToVCS() {
+    const files: { repoPath: string; relativePath: string }[] = [];
+    for (const repo of repoChanges) {
+      for (const file of repo.files) {
+        if (file.status === 'untracked' && file.selected) {
+          files.push({ repoPath: repo.repoPath, relativePath: file.relative_path });
+        }
+      }
+    }
+    await addFilesToVCS(files);
+  }
+
+  function handleFileContextMenu(e: MouseEvent, repoPath: string, file: GitChangedFile & { selected: boolean }, ri: number, fi: number, isUntracked: boolean) {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = isUntracked ? 120 : 160;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 8);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 8);
+    fileContextMenu = { x, y, repoPath, file, repoIdx: ri, fileIdx: fi, isUntracked };
+  }
+
+  async function contextMenuAddToVCS() {
+    if (!fileContextMenu) return;
+    const files: { repoPath: string; relativePath: string }[] = [];
+
+    // If the right-clicked file is selected and there are other selected untracked files,
+    // add all selected untracked files. Otherwise just add the right-clicked file.
+    if (fileContextMenu.file.selected && untrackedSelectedCount > 1) {
+      for (const repo of repoChanges) {
+        for (const file of repo.files) {
+          if (file.status === 'untracked' && file.selected) {
+            files.push({ repoPath: repo.repoPath, relativePath: file.relative_path });
+          }
+        }
+      }
+    } else {
+      files.push({ repoPath: fileContextMenu.repoPath, relativePath: fileContextMenu.file.relative_path });
+    }
+
+    fileContextMenu = null;
+    await addFilesToVCS(files);
+  }
+
+  function contextMenuShowDiff() {
+    if (!fileContextMenu) return;
+    const f = fileContextMenu.file;
+    const fileName = f.relative_path.split('/').pop() || '';
+    openDiffDialog(fileContextMenu.repoPath, f.relative_path, fileName, f.staged);
+    fileContextMenu = null;
+  }
+
+  function contextMenuJumpToSource() {
+    if (!fileContextMenu) return;
+    // Open the file in the editor
+    import('$lib/stores/workspace').then(({ openFile }) => {
+      openFile({
+        name: fileContextMenu!.file.relative_path.split('/').pop() || '',
+        path: fileContextMenu!.repoPath + '/' + fileContextMenu!.file.relative_path,
+        type: 'file',
+        is_git_repo: false,
+      });
+    });
+    fileContextMenu = null;
+  }
+
+  async function contextMenuRollback() {
+    if (!fileContextMenu) return;
+    showRollbackConfirm = true;
+  }
+
+  async function doRollback() {
+    if (!fileContextMenu) return;
+    const ctx = fileContextMenu;
+    showRollbackConfirm = false;
+
+    // Collect files to rollback: if the right-clicked file is selected and multiple tracked files are selected, rollback all selected tracked files
+    const filesToRollback: { repoPath: string; relativePath: string; status: string }[] = [];
+    if (ctx.file.selected && trackedSelectedCount > 1) {
+      for (const repo of repoChanges) {
+        for (const file of repo.files) {
+          if (file.status !== 'untracked' && file.selected) {
+            filesToRollback.push({ repoPath: repo.repoPath, relativePath: file.relative_path, status: file.status });
+          }
+        }
+      }
+    } else {
+      filesToRollback.push({ repoPath: ctx.repoPath, relativePath: ctx.file.relative_path, status: ctx.file.status });
+    }
+
+    let rolledBack = 0;
+    for (const f of filesToRollback) {
+      try {
+        if (f.status === 'added') {
+          // For newly added files, unstage them
+          await invoke<string>('git_command', {
+            repoPath: f.repoPath,
+            args: ['reset', 'HEAD', '--', f.relativePath],
+          });
+        } else {
+          // For modified/deleted files, restore to HEAD
+          await invoke<string>('git_command', {
+            repoPath: f.repoPath,
+            args: ['checkout', 'HEAD', '--', f.relativePath],
+          });
+        }
+        rolledBack++;
+      } catch (e) {
+        console.error('Rollback failed:', f.relativePath, e);
+      }
+    }
+
+    fileContextMenu = null;
+    if (rolledBack > 0) {
+      showToast(`Rolled back ${rolledBack} file${rolledBack !== 1 ? 's' : ''}`, 'success');
+      await loadChanges();
+    }
+  }
+
+  async function contextMenuDelete() {
+    if (!fileContextMenu) return;
+    const fullPath = fileContextMenu.repoPath + '/' + fileContextMenu.file.relative_path;
+    try {
+      await invoke('delete_path', { path: fullPath });
+      showToast('File deleted', 'info');
+      fileContextMenu = null;
+      await loadChanges();
+    } catch (e: any) {
+      showToast(`Delete failed: ${e}`, 'error');
+      fileContextMenu = null;
+    }
+  }
+
   function selectFile(repoPath: string, file: GitChangedFile) {
     selectedFile = { repoPath, file };
   }
@@ -206,7 +429,7 @@
         for (const file of selectedFiles) {
           await invoke<string>('git_command', {
             repoPath: repo.repoPath,
-            args: ['add', file.relative_path],
+            args: ['add', '--', file.relative_path],
           });
         }
 
@@ -220,10 +443,22 @@
         });
 
         if (andPush) {
-          await invoke<string>('git_command', {
-            repoPath: repo.repoPath,
-            args: ['push'],
-          });
+          try {
+            await invoke<string>('git_command', {
+              repoPath: repo.repoPath,
+              args: ['push'],
+            });
+          } catch {
+            // If push fails (e.g. no upstream), try with --set-upstream
+            const branch = await invoke<string>('git_command', {
+              repoPath: repo.repoPath,
+              args: ['rev-parse', '--abbrev-ref', 'HEAD'],
+            });
+            await invoke<string>('git_command', {
+              repoPath: repo.repoPath,
+              args: ['push', '--set-upstream', 'origin', branch.trim()],
+            });
+          }
         }
 
         successCount++;
@@ -330,11 +565,12 @@
 
 {#if isOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog-container" onkeydown={handleKeydown} tabindex="-1">
-    <div class="dialog">
+  <div class="dialog-container" style="{dialogX !== null ? `left: ${dialogX}px; top: ${dialogY}px; transform: none;` : ''}" onkeydown={handleKeydown} tabindex="-1">
+    <div class="dialog" style="width: {dialogW}px; height: {dialogH}px;">
 
-      <!-- Title bar with tabs -->
-      <div class="title-bar">
+      <!-- Title bar with tabs (drag handle) -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="title-bar" onmousedown={startDrag} style="cursor: move;">
         <div class="title-tabs">
           <button
             class="tab"
@@ -392,80 +628,147 @@
 
         <!-- Changes tree — takes up top half -->
         <div class="changes-tree">
-          <!-- Master header row -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="changes-header" onclick={toggleAll}>
-            <span class="chevron chevron-root">
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z"/>
-              </svg>
-            </span>
-            <input
-              type="checkbox"
-              class="cb"
-              checked={allFilesSelected()}
-              indeterminate={someFilesSelected()}
-              onclick={(e) => { e.stopPropagation(); toggleAll(); }}
-            />
-            <span class="changes-label">Changes</span>
-            <span class="changes-count">{totalFileCount()} file{totalFileCount() !== 1 ? 's' : ''}</span>
-          </div>
-
-          {#each repoChanges as repo, ri}
-            <div class="repo-group">
+          {#if repoChanges.length === 0}
+            <div class="no-changes">No changes to commit</div>
+          {:else}
+            <!-- Changes section (tracked files) -->
+            {#if trackedCount > 0}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="repo-row">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <span
-                  class="chevron"
-                  class:expanded={repo.expanded}
-                  onclick={() => toggleRepoExpand(ri)}
-                >
+              <div class="changes-header" onclick={() => changesExpanded = !changesExpanded}>
+                <span class="chevron" class:expanded={changesExpanded}>
                   <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
                   </svg>
                 </span>
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <input
                   type="checkbox"
                   class="cb"
-                  checked={repo.files.every(f => f.selected)}
-                  indeterminate={repo.files.some(f => f.selected) && !repo.files.every(f => f.selected)}
-                  onclick={(e) => { e.stopPropagation(); toggleRepo(ri); }}
+                  checked={trackedCount > 0 && trackedSelectedCount === trackedCount}
+                  indeterminate={trackedSelectedCount > 0 && trackedSelectedCount < trackedCount}
+                  onclick={(e) => { e.stopPropagation(); toggleAllTracked(); }}
                 />
-                <span class="repo-icon" style="background: var(--color-accent)"></span>
-                <span class="repo-name">{repo.repoName}</span>
-                <span class="repo-file-count">&nbsp;{repo.files.filter(f => f.selected).length} file{repo.files.filter(f => f.selected).length !== 1 ? 's' : ''}</span>
-                <span class="repo-branch">{repo.branch}</span>
+                <span class="changes-label">Changes</span>
+                <span class="changes-count">{trackedCount} file{trackedCount !== 1 ? 's' : ''}</span>
               </div>
 
-              {#if repo.expanded}
-                {#each repo.files as file, fi}
-                  <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <div
-                    class="file-row"
-                    class:file-row-selected={selectedFile?.file.relative_path === file.relative_path && selectedFile?.repoPath === repo.repoPath}
-                    onclick={() => selectFile(repo.repoPath, file)}
-                    ondblclick={() => { selectFile(repo.repoPath, file); showDiffForSelected(); }}
-                  >
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <input
-                      type="checkbox"
-                      class="cb"
-                      checked={file.selected}
-                      onclick={(e) => { e.stopPropagation(); toggleFile(ri, fi); }}
-                    />
-                    <span class="file-status-letter" style="color: {statusColor(file.status)}">{statusLetter(file.status)}</span>
-                    <span class="file-name">{file.relative_path.split('/').pop()}</span>
-                    <span class="file-path-hint">{file.relative_path.includes('/') ? file.relative_path.substring(0, file.relative_path.lastIndexOf('/')) : ''}</span>
-                  </div>
+              {#if changesExpanded}
+                {#each repoChanges as repo, ri}
+                  {@const trackedFiles = repo.files.filter(f => f.status !== 'untracked')}
+                  {#if trackedFiles.length > 0}
+                    <div class="repo-group">
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <div class="repo-row">
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                          class="chevron"
+                          class:expanded={repo.expanded}
+                          onclick={() => toggleRepoExpand(ri)}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
+                          </svg>
+                        </span>
+                        <span class="repo-icon" style="background: var(--color-accent)"></span>
+                        <span class="repo-name">{repo.repoName}</span>
+                        <span class="repo-file-count">&nbsp;{trackedFiles.filter(f => f.selected).length} file{trackedFiles.filter(f => f.selected).length !== 1 ? 's' : ''}</span>
+                        <span class="repo-branch">{repo.branch}</span>
+                      </div>
+
+                      {#if repo.expanded}
+                        {#each repo.files as file, fi}
+                          {#if file.status !== 'untracked'}
+                            <!-- svelte-ignore a11y_no_static_element_interactions -->
+                            <div
+                              class="file-row"
+                              class:file-row-selected={selectedFile?.file.relative_path === file.relative_path && selectedFile?.repoPath === repo.repoPath}
+                              onclick={() => selectFile(repo.repoPath, file)}
+                              ondblclick={() => { selectFile(repo.repoPath, file); showDiffForSelected(); }}
+                              oncontextmenu={(e) => handleFileContextMenu(e, repo.repoPath, file, ri, fi, false)}
+                            >
+                              <!-- svelte-ignore a11y_no_static_element_interactions -->
+                              <input
+                                type="checkbox"
+                                class="cb"
+                                checked={file.selected}
+                                onclick={(e) => { e.stopPropagation(); toggleFile(ri, fi); }}
+                              />
+                              <span class="file-status-letter" style="color: {statusColor(file.status)}">{statusLetter(file.status)}</span>
+                              <span class="file-name">{file.relative_path.split('/').pop()}</span>
+                              <span class="file-path-hint">{file.relative_path.includes('/') ? file.relative_path.substring(0, file.relative_path.lastIndexOf('/')) : ''}</span>
+                            </div>
+                          {/if}
+                        {/each}
+                      {/if}
+                    </div>
+                  {/if}
                 {/each}
               {/if}
-            </div>
-          {/each}
+            {/if}
 
-          {#if repoChanges.length === 0}
-            <div class="no-changes">No changes to commit</div>
+            <!-- Unversioned Files section (untracked files) -->
+            {#if untrackedCount > 0}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="changes-header unversioned-header" onclick={() => unversionedExpanded = !unversionedExpanded}>
+                <span class="chevron" class:expanded={unversionedExpanded}>
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
+                  </svg>
+                </span>
+                <input
+                  type="checkbox"
+                  class="cb"
+                  checked={untrackedCount > 0 && untrackedSelectedCount === untrackedCount}
+                  indeterminate={untrackedSelectedCount > 0 && untrackedSelectedCount < untrackedCount}
+                  onclick={(e) => { e.stopPropagation(); toggleAllUntracked(); }}
+                />
+                <span class="changes-label">Unversioned Files</span>
+                <span class="changes-count">{untrackedCount} file{untrackedCount !== 1 ? 's' : ''}</span>
+                {#if untrackedSelectedCount > 0}
+                  <button class="add-vcs-btn" onclick={(e) => { e.stopPropagation(); addSelectedToVCS(); }} title="Stage selected untracked files (git add)">
+                    Add to VCS
+                  </button>
+                {/if}
+              </div>
+
+              {#if unversionedExpanded}
+                {#each repoChanges as repo, ri}
+                  {@const untrackedFiles = repo.files.filter(f => f.status === 'untracked')}
+                  {#if untrackedFiles.length > 0}
+                    <div class="repo-group">
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <div class="repo-row">
+                        <span class="repo-icon" style="background: var(--color-text-muted)"></span>
+                        <span class="repo-name">{repo.repoName}</span>
+                        <span class="repo-file-count">&nbsp;{untrackedFiles.length} file{untrackedFiles.length !== 1 ? 's' : ''}</span>
+                      </div>
+
+                      {#each repo.files as file, fi}
+                        {#if file.status === 'untracked'}
+                          <!-- svelte-ignore a11y_no_static_element_interactions -->
+                          <div
+                            class="file-row"
+                            class:file-row-selected={selectedFile?.file.relative_path === file.relative_path && selectedFile?.repoPath === repo.repoPath}
+                            onclick={() => selectFile(repo.repoPath, file)}
+                            oncontextmenu={(e) => handleFileContextMenu(e, repo.repoPath, file, ri, fi, true)}
+                          >
+                            <!-- svelte-ignore a11y_no_static_element_interactions -->
+                            <input
+                              type="checkbox"
+                              class="cb"
+                              checked={file.selected}
+                              onclick={(e) => { e.stopPropagation(); toggleFile(ri, fi); }}
+                            />
+                            <span class="file-status-letter" style="color: {statusColor(file.status)}">{statusLetter(file.status)}</span>
+                            <span class="file-name">{file.relative_path.split('/').pop()}</span>
+                            <span class="file-path-hint">{file.relative_path.includes('/') ? file.relative_path.substring(0, file.relative_path.lastIndexOf('/')) : ''}</span>
+                          </div>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
+                {/each}
+              {/if}
+            {/if}
           {/if}
         </div>
 
@@ -607,6 +910,66 @@
         </div>
       {/if}
 
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="resize-handle" onmousedown={startResize}></div>
+    </div>
+  </div>
+{/if}
+
+{#if fileContextMenu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="file-ctx-backdrop" onclick={() => { fileContextMenu = null; showRollbackConfirm = false; }}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="file-ctx-menu" style="left: {fileContextMenu.x}px; top: {fileContextMenu.y}px;" onclick={(e) => e.stopPropagation()}>
+      {#if fileContextMenu.isUntracked}
+        <!-- Untracked file menu -->
+        <button class="file-ctx-item" onclick={contextMenuAddToVCS}>
+          {fileContextMenu.file.selected && untrackedSelectedCount > 1
+            ? `Add ${untrackedSelectedCount} Files to VCS`
+            : 'Add to VCS'}
+        </button>
+        <div class="file-ctx-sep"></div>
+        <button class="file-ctx-item" onclick={contextMenuJumpToSource}>
+          Jump to Source
+        </button>
+        <div class="file-ctx-sep"></div>
+        <button class="file-ctx-item file-ctx-danger" onclick={contextMenuDelete}>
+          Delete
+        </button>
+      {:else}
+        <!-- Tracked file menu -->
+        {#if !showRollbackConfirm}
+          <button class="file-ctx-item" onclick={contextMenuRollback}>
+            {fileContextMenu.file.selected && trackedSelectedCount > 1
+              ? `Rollback ${trackedSelectedCount} Files...`
+              : 'Rollback...'}
+          </button>
+          <div class="file-ctx-sep"></div>
+          <button class="file-ctx-item" onclick={contextMenuShowDiff}>
+            Show Diff
+          </button>
+          <button class="file-ctx-item" onclick={contextMenuJumpToSource}>
+            Jump to Source
+          </button>
+          <div class="file-ctx-sep"></div>
+          <button class="file-ctx-item file-ctx-danger" onclick={contextMenuDelete}>
+            Delete
+          </button>
+        {:else}
+          <div class="file-ctx-confirm">
+            <span class="file-ctx-confirm-text">
+              Rollback {fileContextMenu.file.selected && trackedSelectedCount > 1
+                ? `${trackedSelectedCount} files`
+                : fileContextMenu.file.relative_path.split('/').pop()}? Changes will be lost.
+            </span>
+            <div class="file-ctx-confirm-actions">
+              <button class="file-ctx-confirm-btn cancel" onclick={() => { showRollbackConfirm = false; fileContextMenu = null; }}>Cancel</button>
+              <button class="file-ctx-confirm-btn danger" onclick={doRollback}>Rollback</button>
+            </div>
+          </div>
+        {/if}
+      {/if}
     </div>
   </div>
 {/if}
@@ -622,14 +985,13 @@
   }
 
   .dialog {
-    width: 650px;
-    height: 500px;
     background: var(--color-bg-elevated);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255,255,255,0.04);
     animation: dialogIn 0.12s ease-out;
   }
@@ -637,6 +999,28 @@
   @keyframes dialogIn {
     from { opacity: 0; transform: scale(0.97) translateY(-4px); }
     to   { opacity: 1; transform: scale(1)    translateY(0); }
+  }
+
+  .resize-handle {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    z-index: 10;
+  }
+
+  .resize-handle::after {
+    content: '';
+    position: absolute;
+    bottom: 3px;
+    right: 3px;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid var(--color-text-muted);
+    border-bottom: 2px solid var(--color-text-muted);
+    opacity: 0.4;
   }
 
   /* ── Title bar ── */
@@ -777,6 +1161,128 @@
 
   .changes-header:hover {
     background: var(--color-bg-hover);
+  }
+
+  .unversioned-header {
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  .add-vcs-btn {
+    padding: 1px 8px;
+    font-size: 10px;
+    font-family: inherit;
+    font-weight: 500;
+    background: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+    margin-left: auto;
+  }
+
+  .add-vcs-btn:hover {
+    background: var(--color-accent);
+    color: #fff;
+    border-color: transparent;
+  }
+
+  .file-ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+  }
+
+  .file-ctx-menu {
+    position: fixed;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    min-width: 180px;
+    z-index: 301;
+  }
+
+  .file-ctx-item {
+    display: block;
+    width: 100%;
+    padding: 6px 14px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .file-ctx-item:hover {
+    background: var(--color-accent);
+    color: #fff;
+  }
+
+  .file-ctx-danger:hover {
+    background: var(--color-error);
+    color: #fff;
+  }
+
+  .file-ctx-sep {
+    height: 1px;
+    background: var(--color-border);
+    margin: 3px 0;
+  }
+
+  .file-ctx-confirm {
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .file-ctx-confirm-text {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    line-height: 1.4;
+  }
+
+  .file-ctx-confirm-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .file-ctx-confirm-btn {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .file-ctx-confirm-btn.cancel {
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+  }
+
+  .file-ctx-confirm-btn.cancel:hover {
+    background: var(--color-bg-active);
+    color: var(--color-text-primary);
+  }
+
+  .file-ctx-confirm-btn.danger {
+    background: var(--color-error);
+    color: #fff;
+    border-color: transparent;
+  }
+
+  .file-ctx-confirm-btn.danger:hover {
+    opacity: 0.9;
   }
 
   .chevron {

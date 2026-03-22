@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{Emitter, Manager, State};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
 
 // ============================================
 // File System
@@ -449,7 +450,21 @@ fn get_git_status(repo_path: String) -> Result<GitRepo, String> {
         }
         let index_status = line.chars().nth(0).unwrap_or(' ');
         let work_status = line.chars().nth(1).unwrap_or(' ');
-        let file_path = line[3..].to_string();
+        let raw_path = line[3..].to_string();
+
+        // Handle quoted paths (git quotes paths with special/non-ASCII chars)
+        let raw_path = if raw_path.starts_with('"') && raw_path.ends_with('"') {
+            raw_path[1..raw_path.len()-1].replace("\\\\", "\\")
+        } else {
+            raw_path
+        };
+
+        // Handle renamed files: "old_path -> new_path"
+        let file_path = if raw_path.contains(" -> ") {
+            raw_path.split(" -> ").last().unwrap_or(&raw_path).to_string()
+        } else {
+            raw_path
+        };
 
         let (status, staged) = match (index_status, work_status) {
             ('?', '?') => ("untracked", false),
@@ -504,7 +519,7 @@ fn get_git_log(repo_path: String, count: u32) -> Result<Vec<GitLogEntry>, String
         &[
             "log",
             &format!("-{}", count),
-            "--pretty=format:%H|%h|%s|%an|%ad|%D",
+            "--pretty=format:%H%x00%h%x00%s%x00%an%x00%ad%x00%D",
             "--date=format:%d.%m.%Y, %H:%M",
         ],
     )?;
@@ -513,7 +528,7 @@ fn get_git_log(repo_path: String, count: u32) -> Result<Vec<GitLogEntry>, String
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
-            let parts: Vec<&str> = line.splitn(6, '|').collect();
+            let parts: Vec<&str> = line.splitn(6, '\0').collect();
             GitLogEntry {
                 hash: parts.first().unwrap_or(&"").to_string(),
                 short_hash: parts.get(1).unwrap_or(&"").to_string(),
@@ -544,6 +559,8 @@ fn get_git_diff(repo_path: String, file_path: String, staged: bool) -> Result<St
 
 struct TerminalState {
     writers: Mutex<HashMap<u32, Box<dyn Write + Send>>>,
+    masters: Mutex<HashMap<u32, Box<dyn portable_pty::MasterPty + Send>>>,
+    child_pids: Mutex<HashMap<u32, u32>>, // pty_id -> child pid
     next_id: Mutex<u32>,
 }
 
@@ -586,16 +603,28 @@ fn terminal_spawn(
         .take_writer()
         .map_err(|e| format!("Failed to get writer: {}", e))?;
 
-    {
-        let mut writers = state.writers.lock().unwrap();
-        writers.insert(id, writer);
-    }
-
     // Reader thread: read PTY output and emit to frontend
     let mut reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("Failed to get reader: {}", e))?;
+
+    {
+        let mut writers = state.writers.lock().unwrap();
+        writers.insert(id, writer);
+    }
+
+    // Store the master PTY for resize operations
+    {
+        let mut masters = state.masters.lock().unwrap();
+        masters.insert(id, pair.master);
+    }
+
+    // Store child PID for kill operations
+    if let Some(child_pid) = child.process_id() {
+        let mut pids = state.child_pids.lock().unwrap();
+        pids.insert(id, child_pid);
+    }
 
     let app_clone = app.clone();
     let terminal_id = id;
@@ -637,9 +666,42 @@ fn terminal_write(id: u32, data: String, state: State<TerminalState>) -> Result<
 }
 
 #[tauri::command]
-fn terminal_resize(id: u32, rows: u16, cols: u16) -> Result<(), String> {
-    // Note: resize requires keeping a reference to the master PTY
-    // For now this is a no-op, we'll improve this later
+fn terminal_kill(id: u32, state: State<TerminalState>) -> Result<(), String> {
+    // Kill the process group (negative PID = kill entire process group)
+    {
+        let mut pids = state.child_pids.lock().unwrap();
+        if let Some(pid) = pids.remove(&id) {
+            // Kill the entire process group rooted at the shell
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+    // Drop writer and master — this closes the PTY
+    {
+        let mut writers = state.writers.lock().unwrap();
+        writers.remove(&id);
+    }
+    {
+        let mut masters = state.masters.lock().unwrap();
+        masters.remove(&id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn terminal_resize(id: u32, rows: u16, cols: u16, state: State<TerminalState>) -> Result<(), String> {
+    let masters = state.masters.lock().unwrap();
+    if let Some(master) = masters.get(&id) {
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("Resize failed: {}", e))?;
+    }
     Ok(())
 }
 
@@ -1347,11 +1409,14 @@ fn open_new_window(app: tauri::AppHandle, workspace_path: String) -> Result<(), 
             .to_string()
     );
     let project_name = workspace_path.split('/').last().unwrap_or(&workspace_path);
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("/".into()))
+    let encoded = workspace_path.replace(' ', "%20").replace('#', "%23");
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(format!("/?workspace={}", encoded).into()))
         .title(&format!("Vaire \u{2014} {}", project_name))
         .inner_size(1280.0, 820.0)
         .min_inner_size(900.0, 600.0)
         .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1366,8 +1431,97 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .text("new-window", "New Window")
+                .separator()
+                .text("open-folder", "Open Folder...")
+                .text("open-in-new-window", "Open in New Window...")
+                .separator()
+                .text("recent-projects", "Recent Projects...")
+                .separator()
+                .close_window()
+                .build()?;
+
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .text("toggle-terminal", "Toggle Terminal")
+                .text("toggle-sidebar", "Toggle Sidebar")
+                .separator()
+                .fullscreen()
+                .build()?;
+
+            let window_menu = SubmenuBuilder::new(app, "Window")
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
+
+            // On macOS, the first menu is always the app menu
+            let app_menu = SubmenuBuilder::new(app, "Vaire")
+                .about(None)
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&app_menu)
+                .item(&file_menu)
+                .item(&edit_menu)
+                .item(&view_menu)
+                .item(&window_menu)
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            // Handle menu events
+            app.on_menu_event(move |app_handle, event| {
+                match event.id().as_ref() {
+                    "new-window" => {
+                        // Emit event to frontend to open folder dialog
+                        let _ = app_handle.emit("menu-new-window", ());
+                    }
+                    "open-folder" => {
+                        let _ = app_handle.emit("menu-open-folder", ());
+                    }
+                    "open-in-new-window" => {
+                        let _ = app_handle.emit("menu-open-in-new-window", ());
+                    }
+                    "recent-projects" => {
+                        let _ = app_handle.emit("menu-recent-projects", ());
+                    }
+                    "toggle-terminal" => {
+                        let _ = app_handle.emit("menu-toggle-terminal", ());
+                    }
+                    "toggle-sidebar" => {
+                        let _ = app_handle.emit("menu-toggle-sidebar", ());
+                    }
+                    _ => {}
+                }
+            });
+
+            Ok(())
+        })
         .manage(TerminalState {
             writers: Mutex::new(HashMap::new()),
+            masters: Mutex::new(HashMap::new()),
+            child_pids: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
         })
         .manage(DebugState {
@@ -1391,6 +1545,7 @@ pub fn run() {
             scan_todos,
             terminal_spawn,
             terminal_write,
+            terminal_kill,
             terminal_resize,
             create_file,
             create_directory,

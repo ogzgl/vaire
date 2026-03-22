@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { activeSidebarPanel, activeBottomPanel } from '$lib/stores/app';
-  import { openTabs, activeTabIndex, closeTab, openDiff, workspacePath, gitRepos } from '$lib/stores/workspace';
-  import { showSettings } from '$lib/stores/theme';
+  import { openTabs, activeTabIndex, closeTab, workspacePath, gitRepos, openSettingsTab } from '$lib/stores/workspace';
+  import { openDiffDialog } from '$lib/stores/diff';
 
   function handleKeydown(e: KeyboardEvent) {
     const meta = e.metaKey || e.ctrlKey;
@@ -25,7 +25,7 @@
     // Cmd+, — Settings (JetBrains: Cmd+,)
     if (meta && e.key === ',') {
       e.preventDefault();
-      showSettings.update(v => !v);
+      openSettingsTab();
       return;
     }
 
@@ -97,13 +97,12 @@
       e.preventDefault();
       const tab = $openTabs[$activeTabIndex];
       if (tab && !tab.isDiff) {
-        const ws = $workspacePath || '';
         const repos = $gitRepos;
         // Find which repo this file belongs to
         const repo = repos.find(r => tab.path.startsWith(r));
         if (repo) {
           const relativePath = tab.path.replace(repo + '/', '');
-          openDiff(repo, relativePath, tab.name, false);
+          openDiffDialog(repo, relativePath, tab.name, false);
         }
       }
       return;

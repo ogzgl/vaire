@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { openTabs, activeTabIndex, closeTab, workspacePath, openWorkspace, gitRepos, pinTab, unpinTab, loadPinnedPaths, type OpenTab } from '$lib/stores/workspace';
-  import { recentProjects } from '$lib/stores/recent';
+  import { openTabs, activeTabIndex, closeTab, workspacePath, openWorkspace, gitRepos, pinTab, unpinTab, loadPinnedPaths, type OpenTab, type PreviewType } from '$lib/stores/workspace';
+  import { recentProjects, removeRecentProject } from '$lib/stores/recent';
   import MonacoEditor from './MonacoEditor.svelte';
   import MonacoDiffEditor from './MonacoDiffEditor.svelte';
+  import ImageViewer from './ImageViewer.svelte';
+  import MarkdownPreview from './MarkdownPreview.svelte';
+  import SettingsPanel from './SettingsPanel.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { getFileIconSvg } from '$lib/utils/fileIcons';
   import { invoke } from '@tauri-apps/api/core';
@@ -477,30 +480,52 @@
     }
 
     // Load the file content
-    try {
-      const content = await invoke<string>('read_file_content', { path: filePath });
-      const name = filePath.split('/').pop() || filePath;
-      // Detect lang from extension (simple mapping)
-      const ext = name.split('.').pop() || '';
-      const langMap: Record<string, string> = {
-        kt: 'kotlin', ts: 'typescript', tsx: 'typescript', js: 'javascript',
-        jsx: 'javascript', py: 'python', rs: 'rust', go: 'go', rb: 'ruby',
-        java: 'java', swift: 'swift', cs: 'csharp', json: 'json', yaml: 'yaml',
-        yml: 'yaml', toml: 'toml', md: 'markdown', html: 'html', css: 'css',
-        svelte: 'svelte', sh: 'shell', sql: 'sql',
-      };
-      const lang = langMap[ext] || undefined;
-      const newTab: OpenTab = { path: filePath, name, lang, content };
+    const name = filePath.split('/').pop() || filePath;
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+    const langMap: Record<string, string> = {
+      kt: 'kotlin', ts: 'typescript', tsx: 'typescript', js: 'javascript',
+      jsx: 'javascript', py: 'python', rs: 'rust', go: 'go', rb: 'ruby',
+      java: 'java', swift: 'swift', cs: 'csharp', json: 'json', yaml: 'yaml',
+      yml: 'yaml', toml: 'toml', md: 'markdown', html: 'html', css: 'css',
+      svelte: 'svelte', sh: 'shell', sql: 'sql',
+    };
+    const lang = langMap[ext] || undefined;
+
+    // Detect preview type
+    const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico'];
+    let previewType: PreviewType = null;
+    if (imageExts.includes(ext)) previewType = 'image';
+    else if (ext === 'svg') previewType = 'svg';
+    else if (ext === 'md' || ext === 'markdown') previewType = 'markdown';
+
+    // For images, don't read content
+    if (previewType === 'image' || previewType === 'svg') {
+      const newTab: OpenTab = { path: filePath, name, lang, content: '', previewType };
       const targetPane = panes[activePaneIndex] || panes[0];
       if (targetPane) {
         targetPane.tabs.push(newTab);
         targetPane.activeTabIndex = targetPane.tabs.length - 1;
-        // Sync pane 0 to global store
         if (activePaneIndex === 0 || panes.length === 1) {
           openTabs.set(panes[0].tabs);
           activeTabIndex.set(panes[0].activeTabIndex);
         }
-        panes = [...panes]; // trigger reactivity
+        panes = [...panes];
+      }
+      return;
+    }
+
+    try {
+      const content = await invoke<string>('read_file_content', { path: filePath });
+      const newTab: OpenTab = { path: filePath, name, lang, content, previewType };
+      const targetPane = panes[activePaneIndex] || panes[0];
+      if (targetPane) {
+        targetPane.tabs.push(newTab);
+        targetPane.activeTabIndex = targetPane.tabs.length - 1;
+        if (activePaneIndex === 0 || panes.length === 1) {
+          openTabs.set(panes[0].tabs);
+          activeTabIndex.set(panes[0].activeTabIndex);
+        }
+        panes = [...panes];
       }
     } catch (e) {
       console.error('Failed to open file:', filePath, e);
@@ -542,6 +567,9 @@
         <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/>
       </svg>`;
     }
+    if (tab.previewType === 'settings') {
+      return `<img src="/icons/settings.svg" width="13" height="13" alt="" style="display:block" />`;
+    }
     return getFileIconSvg(tab.lang, 'file');
   }
 
@@ -568,13 +596,30 @@
     if (diffDays < 7) return `${diffDays} days ago`;
     return d.toLocaleDateString();
   }
+
+  // Welcome screen context menu
+  let welcomeContextMenu = $state<{ x: number; y: number; project: { name: string; path: string; openedAt: number } } | null>(null);
+
+  function handleWelcomeContextMenu(e: MouseEvent, project: { name: string; path: string; openedAt: number }) {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 200;
+    const menuHeight = 120;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 8);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 8);
+    welcomeContextMenu = { x, y, project };
+  }
+
+  function closeWelcomeContextMenu() {
+    welcomeContextMenu = null;
+  }
 </script>
 
 <div class="editor-area" class:dragging={isDraggingDivider !== null}>
   {#if $openTabs.length === 0 && panes.every(p => p.tabs.length === 0)}
     <!-- Welcome state -->
     <div class="welcome">
-      <div class="welcome-logo">V</div>
+      <img src="/vaire-icon.png" width="64" height="64" alt="Vaire" class="welcome-logo" />
       <h1 class="welcome-title">Vaire</h1>
       <p class="welcome-subtitle">A fast, beautiful code editor</p>
 
@@ -595,7 +640,7 @@
             {#each $recentProjects as project}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <div class="recent-item" onclick={() => openWorkspace(project.path)} role="button" tabindex="0">
+              <div class="recent-item" onclick={() => openWorkspace(project.path)} oncontextmenu={(e) => handleWelcomeContextMenu(e, project)} role="button" tabindex="0">
                 <div class="recent-icon">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M2 6a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Z"/>
@@ -630,6 +675,25 @@
           <span>Split Editor</span>
         </div>
       </div>
+
+      {#if welcomeContextMenu}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="welcome-ctx-backdrop" onclick={closeWelcomeContextMenu}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="welcome-ctx-menu" style="left: {welcomeContextMenu.x}px; top: {welcomeContextMenu.y}px;" onclick={(e) => e.stopPropagation()}>
+            <button class="welcome-ctx-item" onclick={() => { invoke('open_new_window', { workspacePath: welcomeContextMenu!.project.path }); closeWelcomeContextMenu(); }}>
+              Open in New Window
+            </button>
+            <button class="welcome-ctx-item" onclick={() => { removeRecentProject(welcomeContextMenu!.project.path); closeWelcomeContextMenu(); }}>
+              Remove from Recent
+            </button>
+            <button class="welcome-ctx-item" onclick={() => { navigator.clipboard.writeText(welcomeContextMenu!.project.path); closeWelcomeContextMenu(); }}>
+              Copy Path
+            </button>
+          </div>
+        </div>
+      {/if}
     </div>
   {:else}
     <!-- Split panes -->
@@ -671,6 +735,7 @@
                   class:pinned={tab.pinned}
                   onclick={(e) => { e.stopPropagation(); setActivePaneTab(paneIdx, i); }}
                   onmousedown={(e) => onTabMouseDown(e, paneIdx, i, tab)}
+                  onauxclick={(e) => { if (e.button === 1) { e.preventDefault(); closePaneTab(paneIdx, i); } }}
                   oncontextmenu={(e) => openTabContextMenu(e, paneIdx, i, tab)}
                   role="tab"
                   tabindex="0"
@@ -731,7 +796,7 @@
               {/each}
             </div>
 
-            <!-- Editor or Diff View -->
+            <!-- Editor, Diff View, or Preview -->
             <div class="editor-wrapper">
               {#if activeTab.isDiff}
                 {#key activeTab.path + paneIdx}
@@ -741,6 +806,20 @@
                     staged={activeTab.diffStaged || false}
                   />
                 {/key}
+              {:else if activeTab.previewType === 'image' || activeTab.previewType === 'svg'}
+                {#key activeTab.path + paneIdx}
+                  <ImageViewer path={activeTab.path} />
+                {/key}
+              {:else if activeTab.previewType === 'markdown'}
+                {#key activeTab.path + paneIdx}
+                  <MarkdownPreview
+                    content={activeTab.content || ''}
+                    path={activeTab.path}
+                    repoPath={getRepoPathForFile(activeTab.path)}
+                  />
+                {/key}
+              {:else if activeTab.previewType === 'settings'}
+                <SettingsPanel />
               {:else}
                 {#key activeTab.path + paneIdx}
                   <MonacoEditor
@@ -898,13 +977,6 @@
     width: 64px;
     height: 64px;
     border-radius: 16px;
-    background: linear-gradient(135deg, var(--color-accent), var(--color-accent-hover));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 28px;
-    font-weight: 700;
-    color: white;
     margin-bottom: 12px;
   }
 
@@ -1503,5 +1575,41 @@
   .pane-empty-text {
     color: var(--color-text-muted);
     font-size: 13px;
+  }
+
+  .welcome-ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+  }
+
+  .welcome-ctx-menu {
+    position: fixed;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    min-width: 180px;
+    z-index: 101;
+  }
+
+  .welcome-ctx-item {
+    display: block;
+    width: 100%;
+    padding: 6px 14px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .welcome-ctx-item:hover {
+    background: var(--color-accent);
+    color: #fff;
   }
 </style>

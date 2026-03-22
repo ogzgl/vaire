@@ -27,6 +27,7 @@
   let monaco: typeof Monaco;
   let saveTimeout: ReturnType<typeof setTimeout>;
   let disposables: Monaco.IDisposable[] = [];
+  let mounted = $state(false);
 
   // Local History dialog state
   let showLocalHistory = $state(false);
@@ -125,7 +126,8 @@
         : path;
       const data = await invoke<BlameEntry[]>('git_blame', { repoPath, filePath: relativePath });
       blameData = data;
-    } catch {
+    } catch (e) {
+      console.error('fetchBlame failed:', e);
       blameData = [];
     }
   }
@@ -409,7 +411,30 @@
         showLocalHistory = true;
       },
     });
+    // Add "Toggle Bookmark" to Monaco right-click context menu
+    const bookmarkContextAction = editor.addAction({
+      id: 'vaire-bookmark-toggle-ctx',
+      label: 'Toggle Bookmark',
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 9,
+      run: (ed) => {
+        const line = ed.getPosition()?.lineNumber;
+        if (line && path) {
+          const name = path.split('/').pop() || path;
+          toggleBookmark(path, line, name);
+          applyBookmarkDecorations();
+        }
+      },
+    });
+    disposables.push(bookmarkContextAction);
+
     disposables.push(historyAction);
+
+    mounted = true;
+    // Fetch blame now that everything is ready
+    if (repoPath && path && !path.startsWith('diff:')) {
+      fetchBlame();
+    }
   });
 
   // React to theme changes
@@ -450,11 +475,11 @@
     }
   });
 
-  // Fetch blame when path or repoPath changes
+  // Fetch blame when path or repoPath changes (only after mount)
   $effect(() => {
     const _path = path;
     const _repo = repoPath;
-    if (editor && monaco) {
+    if (mounted && editor && monaco) {
       fetchBlame();
       applyBookmarkDecorations();
       applyBreakpointDecorations();

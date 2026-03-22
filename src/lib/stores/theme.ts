@@ -147,9 +147,106 @@ const nord: Theme = {
   },
 };
 
-export const themes: Theme[] = [darcula, oneDark, githubDark, nord];
+// Warp-inspired (warm navy + cream + orange accent)
+const warpDark: Theme = {
+  name: 'Warp',
+  id: 'warp-dark',
+  colors: {
+    bgBase: '#1a1b2e',
+    bgSurface: '#1e1f36',
+    bgElevated: '#252740',
+    bgOverlay: '#2d2f4a',
+    bgHover: '#33365a',
+    bgActive: '#3a3d66',
+    textPrimary: '#e8e4d9',
+    textSecondary: '#b5b0a1',
+    textTertiary: '#8a8577',
+    textMuted: '#5e5a50',
+    accent: '#e8875b',
+    accentHover: '#f09a72',
+    accentSubtle: '#e8875b20',
+    border: '#2d2f4a',
+    borderSubtle: '#252740',
+    borderFocus: '#e8875b',
+    success: '#8bc472',
+    warning: '#e8c06a',
+    error: '#e06060',
+    info: '#6aaef5',
+  },
+};
 
-export const activeThemeId = writable<string>('darcula');
+// Monokai (Classic Sublime Text palette)
+const monokai: Theme = {
+  name: 'Monokai',
+  id: 'monokai',
+  colors: {
+    bgBase: '#272822',
+    bgSurface: '#2d2e27',
+    bgElevated: '#3e3d32',
+    bgOverlay: '#49483e',
+    bgHover: '#4e4d43',
+    bgActive: '#5b5a4f',
+    textPrimary: '#f8f8f2',
+    textSecondary: '#cfcfc2',
+    textTertiary: '#90908a',
+    textMuted: '#636357',
+    accent: '#a6e22e',
+    accentHover: '#b6f23e',
+    accentSubtle: '#a6e22e20',
+    border: '#49483e',
+    borderSubtle: '#3e3d32',
+    borderFocus: '#a6e22e',
+    success: '#a6e22e',
+    warning: '#e6db74',
+    error: '#f92672',
+    info: '#66d9ef',
+  },
+};
+
+// Black (True black / AMOLED)
+const black: Theme = {
+  name: 'Black',
+  id: 'black',
+  colors: {
+    bgBase: '#000000',
+    bgSurface: '#0a0a0a',
+    bgElevated: '#141414',
+    bgOverlay: '#1a1a1a',
+    bgHover: '#1e1e1e',
+    bgActive: '#282828',
+    textPrimary: '#e6edf3',
+    textSecondary: '#8b949e',
+    textTertiary: '#6e7681',
+    textMuted: '#484f58',
+    accent: '#58a6ff',
+    accentHover: '#79c0ff',
+    accentSubtle: '#58a6ff20',
+    border: '#1e1e1e',
+    borderSubtle: '#141414',
+    borderFocus: '#58a6ff',
+    success: '#3fb950',
+    warning: '#d29922',
+    error: '#f85149',
+    info: '#58a6ff',
+  },
+};
+
+export const themes: Theme[] = [darcula, oneDark, githubDark, nord, warpDark, monokai, black];
+
+function loadThemeId(): string {
+  try {
+    return localStorage.getItem('vaire:theme') || 'darcula';
+  } catch {
+    return 'darcula';
+  }
+}
+
+export const activeThemeId = writable<string>(loadThemeId());
+
+// Persist theme changes to localStorage
+activeThemeId.subscribe(id => {
+  try { localStorage.setItem('vaire:theme', id); } catch {}
+});
 
 export const activeTheme = derived(activeThemeId, ($id) => {
   return themes.find((t) => t.id === $id) || darcula;

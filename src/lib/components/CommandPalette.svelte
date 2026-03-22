@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { workspacePath, openFile, type FileNode } from '$lib/stores/workspace';
-  import { showSettings } from '$lib/stores/theme';
+  import { workspacePath, openFile, openSettingsTab, type FileNode } from '$lib/stores/workspace';
   import { activeSidebarPanel, activeBottomPanel } from '$lib/stores/app';
 
   let isOpen = $state(false);
@@ -50,7 +49,7 @@
 
   // Actions
   const actions: PaletteItem[] = [
-    { type: 'action', label: 'Settings', description: 'Open settings', icon: '⚙', action: () => { showSettings.set(true); close(); } },
+    { type: 'action', label: 'Settings', description: 'Open settings', icon: '⚙', action: () => { openSettingsTab(); close(); } },
     { type: 'action', label: 'Toggle Terminal', description: 'Show/hide terminal', icon: '▸', action: () => { activeBottomPanel.update(v => v === 'terminal' ? null : 'terminal'); close(); } },
     { type: 'action', label: 'Toggle Git Log', description: 'Show/hide git log', icon: '⊙', action: () => { activeBottomPanel.update(v => v === 'git-log' ? null : 'git-log'); close(); } },
     { type: 'action', label: 'File Explorer', description: 'Show file tree', icon: '☰', action: () => { activeSidebarPanel.set('files'); close(); } },

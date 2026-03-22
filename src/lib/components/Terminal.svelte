@@ -8,7 +8,11 @@
   import { activeTheme } from '$lib/stores/theme';
   import { fontSettings } from '$lib/stores/theme';
   import { workspacePath } from '$lib/stores/workspace';
+  import { homeDir } from '@tauri-apps/api/path';
   import '@xterm/xterm/css/xterm.css';
+
+  let homeDirPath = $state<string | null>(null);
+  homeDir().then(d => { homeDirPath = d; }).catch(() => {});
 
   interface TerminalTab {
     id: number;           // PTY id from backend
@@ -90,7 +94,7 @@
       fitAddon.fit();
     });
 
-    const cwd = $workspacePath || '/Users';
+    const cwd = $workspacePath || homeDirPath || '/tmp';
     try {
       const ptyId = await invoke<number>('terminal_spawn', { cwd });
       tab.id = ptyId;
@@ -102,6 +106,16 @@
       terminal.onData((data) => {
         invoke('terminal_write', { id: ptyId, data });
       });
+
+      // Send initial resize to match actual terminal dimensions
+      requestAnimationFrame(() => {
+        fitAddon.fit();
+        const cols = terminal.cols;
+        const rows = terminal.rows;
+        if (cols > 0 && rows > 0) {
+          invoke('terminal_resize', { id: ptyId, rows, cols });
+        }
+      });
     } catch (e) {
       terminal.writeln(`\x1b[31mFailed to start terminal: ${e}\x1b[0m`);
     }
@@ -109,6 +123,9 @@
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => {
         fitAddon.fit();
+        if (tab.id >= 0 && terminal.cols > 0 && terminal.rows > 0) {
+          invoke('terminal_resize', { id: tab.id, rows: terminal.rows, cols: terminal.cols });
+        }
       });
     });
     resizeObserver.observe(tab.containerEl);

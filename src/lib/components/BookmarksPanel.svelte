@@ -25,12 +25,33 @@
 <div class="bookmarks-panel">
   {#if $bookmarks.length === 0}
     <div class="empty-state">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-        <path d="M6.5 2H20v20l-7-5-7 5V2z"/>
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.2">
+        <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-5.5L4 22V4a2 2 0 0 1 2-2Z"/>
       </svg>
-      <span class="empty-text">No bookmarks yet</span>
-      <span class="empty-hint">Use Cmd+F11 to bookmark a line</span>
+      <span class="empty-title">No bookmarks</span>
+      <span class="empty-text">Bookmark lines to quickly jump back to important code.</span>
+      <div class="empty-shortcuts">
+        <div class="shortcut-row">
+          <kbd>Cmd+F11</kbd>
+          <span>Toggle Bookmark</span>
+        </div>
+        <div class="shortcut-row">
+          <kbd>F11</kbd>
+          <span>Jump to Next</span>
+        </div>
+        <div class="shortcut-row">
+          <kbd>Right-click</kbd>
+          <span>Toggle Bookmark (editor menu)</span>
+        </div>
+      </div>
+      <button class="bookmark-current-btn" onclick={() => {
+        window.dispatchEvent(new CustomEvent('vaire:bookmark-current-line'));
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+        Bookmark Current Line
+      </button>
     </div>
   {:else}
     <div class="bookmark-list">
@@ -68,19 +89,74 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 200px;
-    gap: 8px;
+    padding: 40px 20px;
+    gap: 10px;
+  }
+
+  .empty-title {
+    color: var(--color-text-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    margin-top: 4px;
   }
 
   .empty-text {
     color: var(--color-text-muted);
     font-size: 12px;
+    text-align: center;
+    line-height: 1.5;
+    max-width: 200px;
   }
 
-  .empty-hint {
-    color: var(--color-text-muted);
+  .empty-shortcuts {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    width: 100%;
+    max-width: 220px;
+  }
+
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     font-size: 11px;
-    opacity: 0.6;
+    color: var(--color-text-muted);
+  }
+
+  .shortcut-row kbd {
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: var(--font-ui);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .bookmark-current-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    margin-top: 8px;
+    background: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .bookmark-current-btn:hover {
+    background: var(--color-accent);
+    color: white;
+    border-color: var(--color-accent);
   }
 
   .bookmark-group {

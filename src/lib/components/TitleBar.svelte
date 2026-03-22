@@ -15,6 +15,7 @@
 
   // Run state
   let isRunning = $state(false);
+  let runningNames = $state<string[]>([]);
   let showRunConfigDialog = $state(false);
   let showRunDropdown = $state(false);
 
@@ -23,19 +24,85 @@
 
   // Listen for run panel status updates
   import { onMount, onDestroy } from 'svelte';
+
+  // Fullscreen detection
+  let isFullscreen = $state(false);
+  let branchNames = $state<Map<string, string>>(new Map());
+  let displayBranch = $derived.by(() => {
+    const names = branchNames;
+    if (names.size === 0) return '';
+    const values = [...names.values()];
+    const counts = new Map<string, number>();
+    for (const b of values) {
+      counts.set(b, (counts.get(b) || 0) + 1);
+    }
+    let mostCommon = values[0];
+    let maxCount = 0;
+    for (const [branch, count] of counts) {
+      if (count > maxCount) {
+        maxCount = count;
+        mostCommon = branch;
+      }
+    }
+    if (maxCount === names.size) return mostCommon;
+    return `${mostCommon} (${maxCount}/${names.size})`;
+  });
+
   function handleRunning(e: Event) {
-    isRunning = (e as CustomEvent<boolean>).detail;
+    const detail = (e as CustomEvent).detail;
+    if (typeof detail === 'boolean') {
+      isRunning = detail;
+      if (!detail) runningNames = [];
+    } else if (detail && typeof detail === 'object') {
+      isRunning = detail.running;
+      runningNames = detail.names || [];
+    }
   }
   function handleDebugging(e: Event) {
-    isDebugging = (e as CustomEvent<boolean>).detail;
+    const detail = (e as CustomEvent).detail;
+    if (typeof detail === 'boolean') {
+      isDebugging = detail;
+    } else if (detail && typeof detail === 'object') {
+      isDebugging = detail.running;
+    }
   }
+
+  async function checkFullscreen() {
+    try {
+      isFullscreen = await getCurrentWindow().isFullscreen();
+    } catch {}
+  }
+
+  // Fetch branch names for all repos
+  async function fetchBranchNames() {
+    const repos = $gitRepos;
+    const map = new Map<string, string>();
+    await Promise.all(repos.map(async (repoPath) => {
+      try {
+        const status = await invoke<{ branch: string }>('get_git_status', { repoPath });
+        if (status.branch) map.set(repoPath, status.branch);
+      } catch {}
+    }));
+    branchNames = map;
+  }
+
+  $effect(() => {
+    const repos = $gitRepos;
+    if (repos.length > 0) {
+      fetchBranchNames();
+    }
+  });
+
   onMount(() => {
     window.addEventListener('vaire:run-status', handleRunning);
     window.addEventListener('vaire:debug-status', handleDebugging);
+    window.addEventListener('resize', checkFullscreen);
+    checkFullscreen();
   });
   onDestroy(() => {
     window.removeEventListener('vaire:run-status', handleRunning);
     window.removeEventListener('vaire:debug-status', handleDebugging);
+    window.removeEventListener('resize', checkFullscreen);
   });
 
   function getActiveConfig() {
@@ -51,14 +118,12 @@
     }
     const wsPath = $workspacePath || '.';
     const cwd = config.cwd === '.' ? wsPath : `${wsPath}/${config.cwd}`;
-    isRunning = true;
     window.dispatchEvent(new CustomEvent('vaire:run-start', {
-      detail: { command: config.command, cwd, env: config.env },
+      detail: { command: config.command, cwd, env: config.env, name: config.name },
     }));
   }
 
   function stopRun() {
-    isRunning = false;
     window.dispatchEvent(new CustomEvent('vaire:run-stop'));
   }
 
@@ -77,7 +142,7 @@
     const cwd = config.cwd === '.' ? wsPath : `${wsPath}/${config.cwd}`;
     activeBottomPanel.set('debug');
     window.dispatchEvent(new CustomEvent('vaire:debug-start', {
-      detail: { command: config.command, cwd },
+      detail: { command: config.command, cwd, env: config.env, name: config.name },
     }));
   }
 
@@ -174,16 +239,16 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="title-bar" onmousedown={handleMouseDown} ondblclick={handleDoubleClick} onclick={() => { showRunDropdown = false; }}>
-  <div class="traffic-light-space"></div>
+  <div class="traffic-light-space" style="width: {isFullscreen ? '0px' : '78px'}"></div>
 
   <div class="project-info">
-    <span class="project-icon">V</span>
+    <img src="/vaire-icon.png" width="18" height="18" alt="V" class="project-icon" />
     <span class="project-name">{$workspaceName || 'Vaire'}</span>
     <span class="branch-name">
       <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
         <path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1 0v1.836A2.25 2.25 0 0 0 5.75 9.5h1.378a2.251 2.251 0 1 0 0-1H5.75a1.25 1.25 0 0 1-1.25-1.25V5.372Zm6.75 2.428a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3.5-6.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/>
       </svg>
-      main
+      {displayBranch || '...'}
     </span>
   </div>
 
@@ -194,18 +259,18 @@
       <span class="op-result">{opResult}</span>
     {/if}
     <button
-      class="title-action-btn"
+      class="title-action-btn fetch-btn"
       class:spinning={isFetchingAll}
       title="Fetch All Repos"
       onclick={fetchAll}
       disabled={isFetchingAll || isPullingAll}
     >
       {#if isFetchingAll}
-        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
         </svg>
       {:else}
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="7 10 12 15 17 10"/>
           <line x1="12" y1="15" x2="12" y2="3"/>
@@ -213,17 +278,17 @@
       {/if}
     </button>
     <button
-      class="title-action-btn"
+      class="title-action-btn pull-btn"
       title="Pull All Repos (ff-only)"
       onclick={pullAll}
       disabled={isFetchingAll || isPullingAll}
     >
       {#if isPullingAll}
-        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
         </svg>
       {:else}
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="17 1 21 5 17 9"/>
           <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
           <polyline points="7 23 3 19 7 15"/>
@@ -233,11 +298,17 @@
     </button>
     <!-- Run controls -->
     <div class="run-controls">
-      <!-- Stop button (only when running) -->
+      {#if isRunning && runningNames.length > 0}
+        <span class="run-config-name">{runningNames.join(', ')}</span>
+        <span class="run-connected-badge">RUNNING</span>
+      {:else if getActiveConfig()}
+        <span class="run-config-name">{getActiveConfig()?.name}</span>
+      {/if}
+      <!-- Stop button (only when something is running) -->
       {#if isRunning}
         <button
           class="title-action-btn stop-btn"
-          title="Stop"
+          title="Stop active run"
           onclick={stopRun}
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
@@ -249,20 +320,12 @@
       <!-- Run button -->
       <button
         class="title-action-btn run-btn"
-        class:running={isRunning}
         title={getActiveConfig()?.name ?? 'Run (no config)'}
         onclick={runActiveConfig}
-        disabled={isRunning}
       >
-        {#if isRunning}
-          <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-          </svg>
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M4.25 3v10l8.5-5-8.5-5Z"/>
-          </svg>
-        {/if}
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M4.25 3v10l8.5-5-8.5-5Z"/>
+        </svg>
       </button>
 
       <!-- Dropdown to select config -->
@@ -324,31 +387,22 @@
       {/if}
       <button
         class="title-action-btn debug-btn"
-        class:debugging={isDebugging}
         title="Debug {getActiveConfig()?.name ?? '(no config)'}"
         onclick={debugActiveConfig}
-        disabled={isDebugging}
       >
-        {#if isDebugging}
-          <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-          </svg>
-        {:else}
-          <!-- Bug icon -->
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M8 2a2 2 0 0 1 4 0"/>
-            <path d="M14 2a2 2 0 0 1 4 0"/>
-            <path d="M12 12v6"/>
-            <path d="M8 9h8"/>
-            <path d="M19 9l2-2"/>
-            <path d="M5 9 3 7"/>
-            <path d="M19 14l2 1"/>
-            <path d="M5 14l-2 1"/>
-            <path d="M6 17l-2 2"/>
-            <path d="M18 17l2 2"/>
-            <rect x="6" y="8" width="12" height="12" rx="2"/>
-          </svg>
-        {/if}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2a2 2 0 0 1 4 0"/>
+          <path d="M14 2a2 2 0 0 1 4 0"/>
+          <path d="M12 12v6"/>
+          <path d="M8 9h8"/>
+          <path d="M19 9l2-2"/>
+          <path d="M5 9 3 7"/>
+          <path d="M19 14l2 1"/>
+          <path d="M5 14l-2 1"/>
+          <path d="M6 17l-2 2"/>
+          <path d="M18 17l2 2"/>
+          <rect x="6" y="8" width="12" height="12" rx="2"/>
+        </svg>
       </button>
     </div>
 
@@ -395,8 +449,8 @@
   }
 
   .traffic-light-space {
-    width: 68px;
     flex-shrink: 0;
+    transition: width 0.15s ease;
   }
 
   .project-info {
@@ -410,13 +464,6 @@
     width: 18px;
     height: 18px;
     border-radius: 4px;
-    background: linear-gradient(135deg, var(--color-accent), var(--color-accent-hover));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 10px;
-    font-weight: 700;
-    color: white;
   }
 
   .project-name {
@@ -462,12 +509,56 @@
     color: var(--color-text-primary);
   }
 
+  .fetch-btn {
+    color: #56b6c2;
+  }
+
+  .fetch-btn:hover:not(:disabled) {
+    color: #6ec8d4;
+  }
+
+  .pull-btn {
+    color: #6a9955;
+  }
+
+  .pull-btn:hover:not(:disabled) {
+    color: #7ebf65;
+  }
+
+  .run-btn {
+    color: var(--color-success);
+  }
+
   .run-btn:hover:not(:disabled) {
     color: var(--color-success);
+    filter: brightness(1.2);
   }
 
   .run-btn:disabled {
     cursor: default;
+  }
+
+  .run-config-name {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    margin-right: 2px;
+  }
+
+  .run-connected-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(74, 222, 128, 0.2);
+    color: var(--color-success);
+    pointer-events: none;
+    margin-right: 2px;
   }
 
   .run-controls {
@@ -581,8 +672,12 @@
     border-left: 1px solid var(--color-border-subtle);
   }
 
+  .debug-btn {
+    color: #e8875b;
+  }
+
   .debug-btn:hover:not(:disabled) {
-    color: #f87171;
+    color: #f09a72;
   }
 
   .debug-btn:disabled {
