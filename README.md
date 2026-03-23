@@ -5,7 +5,7 @@
 <h1 align="center">Vaire</h1>
 
 <p align="center">
-  A fast, opinionated code editor for people who actually write code.
+  A fast, opinionated code editor for people who actually build something.
 </p>
 
 <p align="center">
