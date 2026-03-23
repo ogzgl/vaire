@@ -7,6 +7,7 @@
   import ImageViewer from './ImageViewer.svelte';
   import MarkdownPreview from './MarkdownPreview.svelte';
   import SettingsPanel from './SettingsPanel.svelte';
+  import QueryTab from './QueryTab.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { getFileIconSvg } from '$lib/utils/fileIcons';
   import { invoke } from '@tauri-apps/api/core';
@@ -820,6 +821,13 @@
                 {/key}
               {:else if activeTab.previewType === 'settings'}
                 <SettingsPanel />
+              {:else if activeTab.previewType === 'query'}
+                {#key activeTab.path + paneIdx}
+                  <QueryTab
+                    connectionId={activeTab.connectionId || ''}
+                    initialQuery={activeTab.content || ''}
+                  />
+                {/key}
               {:else}
                 {#key activeTab.path + paneIdx}
                   <MonacoEditor

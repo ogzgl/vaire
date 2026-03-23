@@ -22,7 +22,10 @@ walkdir = "2"
 ignore = "0.4"
 portable-pty = "0.8"
 regex = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+tokio-postgres = "0.7"
+mongodb = "3"
+futures-util = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

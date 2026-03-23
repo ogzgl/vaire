@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type SidebarPanel = 'files' | 'git' | 'search' | 'structure' | 'bookmarks' | 'todo';
+export type SidebarPanel = 'files' | 'git' | 'search' | 'structure' | 'bookmarks' | 'todo' | 'docker' | 'database';
 export type BottomPanel = 'terminal' | 'run' | 'git-log' | 'problems' | 'todo' | 'debug' | null;
 
 export const activeSidebarPanel = writable<SidebarPanel>('files');

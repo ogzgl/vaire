@@ -9,6 +9,8 @@
   import StructurePanel from './StructurePanel.svelte';
   import BookmarksPanel from './BookmarksPanel.svelte';
   import TodoPanel from './TodoPanel.svelte';
+  import DockerPanel from './DockerPanel.svelte';
+  import DatabasePanel from './DatabasePanel.svelte';
   import { getFileIconSvg } from '$lib/utils/fileIcons';
 
   interface SearchResult {
@@ -241,6 +243,10 @@
         Bookmarks
       {:else if $activeSidebarPanel === 'todo'}
         TODO
+      {:else if $activeSidebarPanel === 'docker'}
+        Docker
+      {:else if $activeSidebarPanel === 'database'}
+        Database
       {/if}
     </span>
     {#if $activeSidebarPanel === 'files' && $fileTree.length > 0}
@@ -338,6 +344,10 @@
       <BookmarksPanel />
     {:else if $activeSidebarPanel === 'todo'}
       <TodoPanel />
+    {:else if $activeSidebarPanel === 'docker'}
+      <DockerPanel />
+    {:else if $activeSidebarPanel === 'database'}
+      <DatabasePanel />
     {:else}
       <div class="placeholder-panel">
         <span class="placeholder-text">Select a panel</span>

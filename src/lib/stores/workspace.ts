@@ -13,7 +13,7 @@ export interface FileNode {
   expanded?: boolean;
 }
 
-export type PreviewType = 'image' | 'markdown' | 'svg' | 'settings' | null;
+export type PreviewType = 'image' | 'markdown' | 'svg' | 'settings' | 'query' | null;
 
 export interface OpenTab {
   path: string;
@@ -27,6 +27,7 @@ export interface OpenTab {
   pinned?: boolean;
   isScratch?: boolean;
   previewType?: PreviewType;
+  connectionId?: string;
 }
 
 export const workspacePath = writable<string | null>(null);
@@ -158,6 +159,22 @@ export function openSettingsTab() {
     path: settingsPath,
     name: 'Settings',
     previewType: 'settings',
+  };
+  openTabs.update(t => [...t, newTab]);
+  activeTabIndex.set(tabs.length);
+}
+
+export function openQueryTab(connectionId: string, label: string, initialQuery?: string) {
+  const queryPath = `vaire://query/${connectionId}/${Date.now()}`;
+  let tabs: OpenTab[] = [];
+  openTabs.subscribe(v => tabs = v)();
+
+  const newTab: OpenTab = {
+    path: queryPath,
+    name: `Query - ${label}`,
+    previewType: 'query',
+    connectionId,
+    content: initialQuery || '',
   };
   openTabs.update(t => [...t, newTab]);
   activeTabIndex.set(tabs.length);

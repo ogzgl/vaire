@@ -11,6 +11,7 @@
   import PushDialog from '$lib/components/PushDialog.svelte';
   import DiffDialog from '$lib/components/DiffDialog.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
+  import DbConnectionDialog from '$lib/components/DbConnectionDialog.svelte';
   import { onMount, onDestroy } from 'svelte';
   import { sidebarWidth, activeBottomPanel, isSidebarCollapsed } from '$lib/stores/app';
   import { activeTheme, fontSettings } from '$lib/stores/theme';
@@ -21,6 +22,8 @@
   import { invoke } from '@tauri-apps/api/core';
 
   let showRecentProjectsModal = $state(false);
+  let showDbDialog = $state(false);
+  let dbDialogEditConfig = $state<any>(null);
 
   let isResizing = $state(false);
   let menuListeners: UnlistenFn[] = [];
@@ -33,8 +36,15 @@
     }
   }
 
+  function handleDbDialog(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    dbDialogEditConfig = detail?.config ?? null;
+    showDbDialog = true;
+  }
+
   onMount(async () => {
     window.addEventListener('keydown', handleGlobalEsc);
+    window.addEventListener('vaire:db-dialog', handleDbDialog);
 
     // Read workspace from URL query param (new window opened with specific project)
     const params = new URLSearchParams(window.location.search);
@@ -124,6 +134,7 @@
 
   onDestroy(() => {
     window.removeEventListener('keydown', handleGlobalEsc);
+    window.removeEventListener('vaire:db-dialog', handleDbDialog);
     menuListeners.forEach(u => u());
   });
 
@@ -208,6 +219,9 @@
   <PushDialog />
   <DiffDialog />
   <Toasts />
+  {#if showDbDialog}
+    <DbConnectionDialog editConfig={dbDialogEditConfig} onclose={() => { showDbDialog = false; dbDialogEditConfig = null; }} />
+  {/if}
 </div>
 
 {#if showRecentProjectsModal}

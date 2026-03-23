@@ -17,6 +17,8 @@
     { id: 'structure', label: 'Structure', icon: 'structure' },
     { id: 'bookmarks', label: 'Bookmarks', icon: 'bookmarks' },
     { id: 'todo', label: 'TODO', icon: 'todo' },
+    { id: 'docker', label: 'Docker', icon: 'docker' },
+    { id: 'database', label: 'Database', icon: 'database' },
   ];
 
   const bottomItems: { id: BottomPanel; label: string; icon: string }[] = [
@@ -76,6 +78,18 @@
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <rect x="3" y="3" width="18" height="18" rx="3"/>
             <path d="M9.5 12.5l2 2 4-4" stroke="var(--color-bg-surface)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        {:else if item.icon === 'docker'}
+          <!-- Docker whale -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M13.98 11.08h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19h-2.12a.19.19 0 0 0-.19.19v1.88c0 .1.09.19.19.19m-2.95-5.43h2.12a.19.19 0 0 0 .19-.19V3.58a.19.19 0 0 0-.19-.19h-2.12a.19.19 0 0 0-.19.19v1.88c0 .11.09.19.19.19m0 2.71h2.12a.19.19 0 0 0 .19-.19V6.29a.19.19 0 0 0-.19-.19h-2.12a.19.19 0 0 0-.19.19v1.88c0 .11.09.19.19.19m-2.93 0h2.12a.19.19 0 0 0 .19-.19V6.29a.19.19 0 0 0-.19-.19H8.1a.19.19 0 0 0-.19.19v1.88c0 .11.08.19.19.19m-2.96 0h2.12a.19.19 0 0 0 .19-.19V6.29a.19.19 0 0 0-.19-.19H5.14a.19.19 0 0 0-.19.19v1.88c0 .11.09.19.19.19m5.89 2.72h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19h-2.12a.19.19 0 0 0-.19.19v1.88c0 .1.09.19.19.19m-2.93 0h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19H8.1a.19.19 0 0 0-.19.19v1.88c0 .1.08.19.19.19m-2.96 0h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19H5.14a.19.19 0 0 0-.19.19v1.88c0 .1.09.19.19.19m-2.92 0h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19H2.22a.19.19 0 0 0-.19.19v1.88c0 .1.08.19.19.19M23.7 11.59c-.57-.39-1.88-.53-2.89-.34-.13-.93-.7-1.74-1.37-2.27l-.27-.21-.21.27a2.98 2.98 0 0 0-.56 1.63c-.07.79.16 1.54.63 2.12-.29.17-.62.31-.93.42a5.7 5.7 0 0 1-1.7.26H.59l-.04.27a6.6 6.6 0 0 0 .56 3.33l.21.39v.02c1.48 2.48 4.14 3.53 7.15 3.53 5.67 0 10.39-2.6 12.55-8.22 1.43.07 2.85-.36 3.52-1.64l.17-.33-.21-.15z"/>
+          </svg>
+        {:else if item.icon === 'database'}
+          <!-- Database cylinder (stacked discs) -->
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <ellipse cx="12" cy="5" rx="8" ry="3"/>
+            <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+            <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>
           </svg>
         {/if}
       </button>

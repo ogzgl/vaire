@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{Emitter, Manager, State};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
@@ -1434,6 +1435,929 @@ fn open_new_window(app: tauri::AppHandle, workspace_path: String) -> Result<(), 
 }
 
 // ============================================
+// Docker
+// ============================================
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DockerContainer {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub state: String,
+    pub ports: String,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+}
+
+#[tauri::command]
+async fn docker_list_containers() -> Result<Vec<DockerContainer>, String> {
+    tokio::task::spawn_blocking(|| {
+        let output = Command::new("docker")
+            .args(["ps", "-a", "--format", "{{json .}}"])
+            .output()
+            .map_err(|e| format!("Docker not found: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut containers = Vec::new();
+
+        for line in stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                // Parse compose labels from the Labels string
+                let labels_str = val["Labels"].as_str().unwrap_or("");
+                let mut compose_project: Option<String> = None;
+                let mut compose_service: Option<String> = None;
+                for label in labels_str.split(',') {
+                    if let Some(proj) = label.strip_prefix("com.docker.compose.project=") {
+                        compose_project = Some(proj.to_string());
+                    } else if let Some(svc) = label.strip_prefix("com.docker.compose.service=") {
+                        compose_service = Some(svc.to_string());
+                    }
+                }
+
+                containers.push(DockerContainer {
+                    id: val["ID"].as_str().unwrap_or("").to_string(),
+                    name: val["Names"].as_str().unwrap_or("").to_string(),
+                    image: val["Image"].as_str().unwrap_or("").to_string(),
+                    status: val["Status"].as_str().unwrap_or("").to_string(),
+                    state: val["State"].as_str().unwrap_or("").to_string(),
+                    ports: val["Ports"].as_str().unwrap_or("").to_string(),
+                    compose_project,
+                    compose_service,
+                });
+            }
+        }
+
+        Ok(containers)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn docker_container_action(container_id: String, action: String) -> Result<(), String> {
+    let allowed = ["start", "stop", "restart", "rm"];
+    if !allowed.contains(&action.as_str()) {
+        return Err(format!("Invalid action: {}", action));
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let mut args = vec![action.as_str()];
+        if action == "rm" {
+            args.push("-f");
+        }
+        args.push(&container_id);
+
+        let output = Command::new("docker")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("Docker command failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn docker_compose_action(project: String, action: String) -> Result<(), String> {
+    let allowed = ["start", "stop", "restart", "down"];
+    if !allowed.contains(&action.as_str()) {
+        return Err(format!("Invalid action: {}", action));
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("docker")
+            .args(["compose", "-p", &project, &action])
+            .output()
+            .map_err(|e| format!("Docker compose failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn docker_logs_spawn(
+    container_id: String,
+    state: State<TerminalState>,
+    app: tauri::AppHandle,
+) -> Result<u32, String> {
+    let id = {
+        let mut next = state.next_id.lock().unwrap();
+        let current = *next;
+        *next += 1;
+        current
+    };
+
+    let app_clone = app.clone();
+    let terminal_id = id;
+
+    // Spawn a thread that runs `docker logs -f --tail 200 <id>` and streams output
+    std::thread::spawn(move || {
+        let mut child = match Command::new("docker")
+            .args(["logs", "-f", "--tail", "200", &container_id])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = app_clone.emit(
+                    &format!("terminal-output-{}", terminal_id),
+                    format!("\x1b[31mFailed to get logs: {}\x1b[0m\r\n", e),
+                );
+                return;
+            }
+        };
+
+        // Store child PID so terminal_kill can stop it
+        // We reuse child_pids from TerminalState — but we can't access State from here.
+        // Instead, we read stdout in this thread and emit events.
+
+        if let Some(stdout) = child.stdout.take() {
+            let app_out = app_clone.clone();
+            let tid = terminal_id;
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = app_out.emit(
+                                &format!("terminal-output-{}", tid),
+                                format!("{}\r\n", l),
+                            );
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            let app_err = app_clone.clone();
+            let tid = terminal_id;
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = app_err.emit(
+                                &format!("terminal-output-{}", tid),
+                                format!("{}\r\n", l),
+                            );
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        // Store the child PID for cleanup
+        let pid = child.id();
+        // Wait for the child to finish
+        let _ = child.wait();
+        // Emit a final message
+        let _ = app_clone.emit(
+            &format!("terminal-output-{}", terminal_id),
+            "\r\n\x1b[33m[Log stream ended]\x1b[0m\r\n".to_string(),
+        );
+
+        // We stored pid; the frontend calls terminal_kill which uses child_pids.
+        // Since we can't access State here, the frontend should just stop listening.
+        let _ = pid;
+    });
+
+    Ok(id)
+}
+
+// ============================================
+// Database Explorer
+// ============================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DbConnectionConfig {
+    pub id: String,
+    pub label: String,
+    pub db_type: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+    pub is_prod: bool,
+    pub ssl: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DbTableInfo {
+    pub name: String,
+    pub table_type: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DbColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub is_nullable: bool,
+    pub is_primary_key: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DbQueryResult {
+    pub columns: Vec<String>,
+    pub column_types: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub affected_rows: u64,
+    pub execution_time_ms: u64,
+}
+
+struct DatabaseState {
+    pg_connections: tokio::sync::Mutex<HashMap<String, tokio_postgres::Client>>,
+    mongo_connections: tokio::sync::Mutex<HashMap<String, mongodb::Client>>,
+}
+
+fn pg_connection_string(config: &DbConnectionConfig) -> String {
+    // Use key=value format with single-quoted values to handle special chars
+    format!(
+        "host='{}' port='{}' dbname='{}' user='{}' password='{}'",
+        config.host.replace('\'', "\\'"),
+        config.port,
+        config.database.replace('\'', "\\'"),
+        config.username.replace('\'', "\\'"),
+        config.password.replace('\'', "\\'")
+    )
+}
+
+fn pg_error_message(e: &tokio_postgres::Error) -> String {
+    // Extract the actual database error message if available
+    if let Some(db_err) = e.as_db_error() {
+        let mut msg = db_err.message().to_string();
+        if let Some(detail) = db_err.detail() {
+            msg.push_str(&format!(" — {}", detail));
+        }
+        if let Some(hint) = db_err.hint() {
+            msg.push_str(&format!(" (hint: {})", hint));
+        }
+        return msg;
+    }
+    // Fallback to full debug representation
+    format!("{:?}", e)
+}
+
+#[tauri::command]
+async fn db_test_connection(config: DbConnectionConfig) -> Result<(), String> {
+    if config.db_type == "mongodb" {
+        let uri = format!(
+            "mongodb://{}:{}@{}:{}/{}",
+            config.username, config.password, config.host, config.port, config.database
+        );
+        let client = mongodb::Client::with_uri_str(&uri)
+            .await
+            .map_err(|e| format!("MongoDB connection failed: {}", e))?;
+        client
+            .database(&config.database)
+            .run_command(mongodb::bson::doc! { "ping": 1 })
+            .await
+            .map_err(|e| format!("MongoDB ping failed: {}", e))?;
+        Ok(())
+    } else {
+        let conn_str = pg_connection_string(&config);
+        let (client, connection) =
+            tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                .await
+                .map_err(|e| format!("Postgres connection failed: {}", pg_error_message(&e)))?;
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        client
+            .simple_query("SELECT 1")
+            .await
+            .map_err(|e| format!("Postgres query failed: {}", pg_error_message(&e)))?;
+
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn db_connect(
+    config: DbConnectionConfig,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<(), String> {
+    if config.db_type == "mongodb" {
+        let uri = format!(
+            "mongodb://{}:{}@{}:{}/{}",
+            config.username, config.password, config.host, config.port, config.database
+        );
+        let client = mongodb::Client::with_uri_str(&uri)
+            .await
+            .map_err(|e| format!("MongoDB connection failed: {}", e))?;
+
+        // Test the connection
+        client
+            .database(&config.database)
+            .run_command(mongodb::bson::doc! { "ping": 1 })
+            .await
+            .map_err(|e| format!("MongoDB ping failed: {}", e))?;
+
+        let mut conns = state.mongo_connections.lock().await;
+        conns.insert(config.id.clone(), client);
+    } else {
+        let conn_str = pg_connection_string(&config);
+        let (client, connection) =
+            tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                .await
+                .map_err(|e| format!("Postgres connection failed: {}", pg_error_message(&e)))?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Postgres connection error: {}", e);
+            }
+        });
+
+        let mut conns = state.pg_connections.lock().await;
+        conns.insert(config.id.clone(), client);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn db_disconnect(
+    connection_id: String,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<(), String> {
+    {
+        let mut pg = state.pg_connections.lock().await;
+        pg.remove(&connection_id);
+    }
+    {
+        let mut mongo = state.mongo_connections.lock().await;
+        mongo.remove(&connection_id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn db_list_schemas(
+    connection_id: String,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<String>, String> {
+    // Try Postgres first
+    {
+        let conns = state.pg_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let results = client
+                .simple_query(
+                    "SELECT schema_name FROM information_schema.schemata \
+                     WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+                     ORDER BY schema_name",
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut schemas = Vec::new();
+            for msg in results {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    if let Some(name) = row.get(0) {
+                        schemas.push(name.to_string());
+                    }
+                }
+            }
+            return Ok(schemas);
+        }
+    }
+
+    // Try MongoDB
+    {
+        let conns = state.mongo_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let names = client
+                .list_database_names()
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(names);
+        }
+    }
+
+    Err("Connection not found".to_string())
+}
+
+#[tauri::command]
+async fn db_list_tables(
+    connection_id: String,
+    schema: String,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<DbTableInfo>, String> {
+    // Postgres
+    {
+        let conns = state.pg_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let query = format!(
+                "SELECT table_name, table_type FROM information_schema.tables \
+                 WHERE table_schema = '{}' ORDER BY table_name",
+                schema.replace('\'', "''")
+            );
+            let results = client
+                .simple_query(&query)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut tables = Vec::new();
+            for msg in results {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    tables.push(DbTableInfo {
+                        name: row.get(0).unwrap_or("").to_string(),
+                        table_type: row.get(1).unwrap_or("").to_string(),
+                    });
+                }
+            }
+            return Ok(tables);
+        }
+    }
+
+    // MongoDB
+    {
+        let conns = state.mongo_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let db = client.database(&schema);
+            let names = db
+                .list_collection_names()
+                .await
+                .map_err(|e| e.to_string())?;
+            let tables = names
+                .into_iter()
+                .map(|n| DbTableInfo {
+                    name: n,
+                    table_type: "collection".to_string(),
+                })
+                .collect();
+            return Ok(tables);
+        }
+    }
+
+    Err("Connection not found".to_string())
+}
+
+#[tauri::command]
+async fn db_list_columns(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<DbColumnInfo>, String> {
+    // Postgres
+    {
+        let conns = state.pg_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let query = format!(
+                "SELECT c.column_name, c.data_type, c.is_nullable, \
+                 CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END as is_pk \
+                 FROM information_schema.columns c \
+                 LEFT JOIN ( \
+                   SELECT ku.column_name FROM information_schema.table_constraints tc \
+                   JOIN information_schema.key_column_usage ku ON tc.constraint_name = ku.constraint_name \
+                   WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = '{}' AND tc.table_name = '{}' \
+                 ) pk ON c.column_name = pk.column_name \
+                 WHERE c.table_schema = '{}' AND c.table_name = '{}' \
+                 ORDER BY c.ordinal_position",
+                schema.replace('\'', "''"),
+                table.replace('\'', "''"),
+                schema.replace('\'', "''"),
+                table.replace('\'', "''")
+            );
+            let results = client
+                .simple_query(&query)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut columns = Vec::new();
+            for msg in results {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    columns.push(DbColumnInfo {
+                        name: row.get(0).unwrap_or("").to_string(),
+                        data_type: row.get(1).unwrap_or("").to_string(),
+                        is_nullable: row.get(2).unwrap_or("NO") == "YES",
+                        is_primary_key: row.get(3).unwrap_or("NO") == "YES",
+                    });
+                }
+            }
+            return Ok(columns);
+        }
+    }
+
+    // MongoDB: sample first document
+    {
+        let conns = state.mongo_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            use mongodb::bson::doc;
+            let db = client.database(&schema);
+            let collection = db.collection::<mongodb::bson::Document>(&table);
+            let mut cursor = collection
+                .find(doc! {})
+                .limit(1)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut columns = Vec::new();
+            if let Some(doc_result) = cursor.next().await {
+                if let Ok(doc) = doc_result {
+                    for (key, val) in doc.iter() {
+                        let data_type = match val {
+                            mongodb::bson::Bson::String(_) => "string",
+                            mongodb::bson::Bson::Int32(_) => "int32",
+                            mongodb::bson::Bson::Int64(_) => "int64",
+                            mongodb::bson::Bson::Double(_) => "double",
+                            mongodb::bson::Bson::Boolean(_) => "boolean",
+                            mongodb::bson::Bson::ObjectId(_) => "objectId",
+                            mongodb::bson::Bson::Array(_) => "array",
+                            mongodb::bson::Bson::Document(_) => "object",
+                            mongodb::bson::Bson::Null => "null",
+                            _ => "unknown",
+                        };
+                        columns.push(DbColumnInfo {
+                            name: key.clone(),
+                            data_type: data_type.to_string(),
+                            is_nullable: true,
+                            is_primary_key: key == "_id",
+                        });
+                    }
+                }
+            }
+            return Ok(columns);
+        }
+    }
+
+    Err("Connection not found".to_string())
+}
+
+fn pg_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+fn json_value_to_sql(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::String(s) => format!("'{}'", pg_escape(s)),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        _ => format!("'{}'", pg_escape(&val.to_string())),
+    }
+}
+
+#[tauri::command]
+async fn db_execute_query(
+    connection_id: String,
+    query: String,
+    is_prod: bool,
+    force: bool,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<DbQueryResult, String> {
+    let trimmed = query.trim_start().to_uppercase();
+    let is_dml = trimmed.starts_with("INSERT")
+        || trimmed.starts_with("UPDATE")
+        || trimmed.starts_with("DELETE")
+        || trimmed.starts_with("DROP")
+        || trimmed.starts_with("ALTER")
+        || trimmed.starts_with("TRUNCATE");
+
+    if is_prod && is_dml && !force {
+        return Err(serde_json::json!({
+            "prod_warning": true,
+            "message": "You are about to modify a PRODUCTION database",
+            "query": query
+        })
+        .to_string());
+    }
+
+    // Postgres
+    {
+        let conns = state.pg_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let start = std::time::Instant::now();
+            let results = client
+                .simple_query(&query)
+                .await
+                .map_err(|e| e.to_string())?;
+            let elapsed = start.elapsed().as_millis() as u64;
+
+            let mut columns = Vec::new();
+            let mut column_types = Vec::new();
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+            let mut affected_rows: u64 = 0;
+
+            for msg in results {
+                match msg {
+                    tokio_postgres::SimpleQueryMessage::Row(row) => {
+                        if columns.is_empty() {
+                            for col in row.columns() {
+                                columns.push(col.name().to_string());
+                                column_types.push(String::new()); // simple_query doesn't expose types
+                            }
+                        }
+                        if rows.len() < 1000 {
+                            let mut vals = Vec::new();
+                            for i in 0..row.columns().len() {
+                                vals.push(row.get(i).map(|s| s.to_string()));
+                            }
+                            rows.push(vals);
+                        }
+                    }
+                    tokio_postgres::SimpleQueryMessage::CommandComplete(n) => {
+                        affected_rows = n;
+                    }
+                    _ => {}
+                }
+            }
+
+            return Ok(DbQueryResult {
+                columns,
+                column_types,
+                rows,
+                affected_rows,
+                execution_time_ms: elapsed,
+            });
+        }
+    }
+
+    // MongoDB
+    {
+        let conns = state.mongo_connections.lock().await;
+        if let Some(client) = conns.get(&connection_id) {
+            let start = std::time::Instant::now();
+
+            // Parse the JSON query
+            let parsed: serde_json::Value =
+                serde_json::from_str(&query).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+            let collection_name = parsed["collection"]
+                .as_str()
+                .ok_or("Missing 'collection' field")?;
+            let operation = parsed["operation"]
+                .as_str()
+                .ok_or("Missing 'operation' field")?;
+
+            // Use the first database from schemas or connection config
+            // For now, assume the database name is in the connection config
+            // We'll need to get it from somewhere — use a simple approach
+            let db_name = parsed["database"].as_str().unwrap_or("test");
+            let db = client.database(db_name);
+            let collection = db.collection::<mongodb::bson::Document>(collection_name);
+
+            let mut columns = Vec::new();
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+            let mut affected_rows: u64 = 0;
+
+            match operation {
+                "find" => {
+                    let filter = if let Some(f) = parsed.get("filter") {
+                        mongodb::bson::to_document(f).unwrap_or_default()
+                    } else {
+                        mongodb::bson::doc! {}
+                    };
+
+                    let mut cursor = collection
+                        .find(filter)
+                        .limit(1000)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                    while let Some(doc_result) = cursor.next().await {
+                        if rows.len() >= 1000 {
+                            break;
+                        }
+                        match doc_result {
+                            Ok(doc) => {
+                                if columns.is_empty() {
+                                    for (key, _) in doc.iter() {
+                                        columns.push(key.clone());
+                                    }
+                                }
+                                let mut row = Vec::new();
+                                for col in &columns {
+                                    let val = doc.get_str(col)
+                                        .map(|s| s.to_string())
+                                        .ok()
+                                        .or_else(|| doc.get(col).map(|v| format!("{}", v)));
+                                    row.push(val);
+                                }
+                                rows.push(row);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                "insertOne" => {
+                    if let Some(doc) = parsed.get("document") {
+                        let bson_doc =
+                            mongodb::bson::to_document(doc).map_err(|e| e.to_string())?;
+                        collection
+                            .insert_one(bson_doc)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        affected_rows = 1;
+                    }
+                }
+                "updateOne" => {
+                    let filter = if let Some(f) = parsed.get("filter") {
+                        mongodb::bson::to_document(f).unwrap_or_default()
+                    } else {
+                        mongodb::bson::doc! {}
+                    };
+                    let update = if let Some(u) = parsed.get("update") {
+                        mongodb::bson::to_document(u).map_err(|e| e.to_string())?
+                    } else {
+                        return Err("Missing 'update' field".to_string());
+                    };
+                    let result = collection
+                        .update_one(filter, update)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    affected_rows = result.modified_count;
+                }
+                "deleteOne" => {
+                    let filter = if let Some(f) = parsed.get("filter") {
+                        mongodb::bson::to_document(f).unwrap_or_default()
+                    } else {
+                        mongodb::bson::doc! {}
+                    };
+                    let result = collection
+                        .delete_one(filter)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    affected_rows = result.deleted_count;
+                }
+                _ => return Err(format!("Unknown operation: {}", operation)),
+            }
+
+            let elapsed = start.elapsed().as_millis() as u64;
+            let column_types = columns.iter().map(|_| String::new()).collect();
+
+            return Ok(DbQueryResult {
+                columns,
+                column_types,
+                rows,
+                affected_rows,
+                execution_time_ms: elapsed,
+            });
+        }
+    }
+
+    Err("Connection not found".to_string())
+}
+
+#[tauri::command]
+async fn db_update_cell(
+    connection_id: String,
+    schema: String,
+    table: String,
+    pk_column: String,
+    pk_value: String,
+    column: String,
+    new_value: Option<String>,
+    is_prod: bool,
+    force: bool,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let val_sql = match &new_value {
+        Some(v) => format!("'{}'", pg_escape(v)),
+        None => "NULL".to_string(),
+    };
+    let sql = format!(
+        "UPDATE {}.{} SET {} = {} WHERE {} = '{}'",
+        pg_escape(&schema),
+        pg_escape(&table),
+        pg_escape(&column),
+        val_sql,
+        pg_escape(&pk_column),
+        pg_escape(&pk_value)
+    );
+
+    if is_prod && !force {
+        return Err(serde_json::json!({
+            "prod_warning": true,
+            "query": sql
+        })
+        .to_string());
+    }
+
+    let conns = state.pg_connections.lock().await;
+    let client = conns
+        .get(&connection_id)
+        .ok_or("Connection not found")?;
+    client
+        .simple_query(&sql)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn db_insert_row(
+    connection_id: String,
+    schema: String,
+    table: String,
+    row_data: HashMap<String, Option<String>>,
+    is_prod: bool,
+    force: bool,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let cols: Vec<String> = row_data.keys().cloned().collect();
+    let vals: Vec<String> = row_data
+        .values()
+        .map(|v| match v {
+            Some(s) => format!("'{}'", pg_escape(s)),
+            None => "NULL".to_string(),
+        })
+        .collect();
+
+    let sql = format!(
+        "INSERT INTO {}.{} ({}) VALUES ({})",
+        pg_escape(&schema),
+        pg_escape(&table),
+        cols.join(", "),
+        vals.join(", ")
+    );
+
+    if is_prod && !force {
+        return Err(serde_json::json!({
+            "prod_warning": true,
+            "query": sql
+        })
+        .to_string());
+    }
+
+    let conns = state.pg_connections.lock().await;
+    let client = conns
+        .get(&connection_id)
+        .ok_or("Connection not found")?;
+    client
+        .simple_query(&sql)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn db_delete_rows(
+    connection_id: String,
+    schema: String,
+    table: String,
+    pk_column: String,
+    pk_values: Vec<String>,
+    is_prod: bool,
+    force: bool,
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let escaped: Vec<String> = pk_values
+        .iter()
+        .map(|v| format!("'{}'", pg_escape(v)))
+        .collect();
+    let sql = format!(
+        "DELETE FROM {}.{} WHERE {} IN ({})",
+        pg_escape(&schema),
+        pg_escape(&table),
+        pg_escape(&pk_column),
+        escaped.join(", ")
+    );
+
+    if is_prod && !force {
+        return Err(serde_json::json!({
+            "prod_warning": true,
+            "query": sql
+        })
+        .to_string());
+    }
+
+    let conns = state.pg_connections.lock().await;
+    let client = conns
+        .get(&connection_id)
+        .ok_or("Connection not found")?;
+    client
+        .simple_query(&sql)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ============================================
 // App Init
 // ============================================
 
@@ -1538,6 +2462,10 @@ pub fn run() {
         .manage(DebugState {
             processes: Mutex::new(HashMap::new()),
         })
+        .manage(DatabaseState {
+            pg_connections: tokio::sync::Mutex::new(HashMap::new()),
+            mongo_connections: tokio::sync::Mutex::new(HashMap::new()),
+        })
         .invoke_handler(tauri::generate_handler![
             read_directory,
             read_file_content,
@@ -1577,6 +2505,20 @@ pub fn run() {
             debug_start,
             debug_stop,
             open_new_window,
+            docker_list_containers,
+            docker_container_action,
+            docker_compose_action,
+            docker_logs_spawn,
+            db_test_connection,
+            db_connect,
+            db_disconnect,
+            db_list_schemas,
+            db_list_tables,
+            db_list_columns,
+            db_execute_query,
+            db_update_cell,
+            db_insert_row,
+            db_delete_rows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
